@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +26,13 @@ from app.services.errors import openai_error
 from app.services.queue import enqueue_job, job_to_resource
 
 router = APIRouter()
+
+# The download route is mounted separately, without the API-key dependency,
+# so that a video can be fetched by URL alone: `GET /v1/videos/{id}/content`
+# is what a browser <video> tag, a player or a third-party page points at,
+# and those callers have no API key. The job id is an unguessable token, so
+# the id itself is the capability.
+public_router = APIRouter()
 
 
 @router.post(
@@ -125,16 +132,6 @@ async def create_video(
     return job_to_resource(job)
 
 
-@router.get("/videos/{video_id}", response_model=VideoResource)
-async def retrieve_video(
-    video_id: str, session: AsyncSession = Depends(get_session)
-) -> VideoResource:
-    job = await session.get(VideoJob, video_id)
-    if job is None:
-        raise openai_error(404, f"video {video_id!r} not found", "invalid_request_error")
-    return job_to_resource(job)
-
-
 @router.get("/videos", response_model=VideoList)
 async def list_videos(
     limit: int = 20, session: AsyncSession = Depends(get_session)
@@ -147,11 +144,37 @@ async def list_videos(
     return VideoList(data=[job_to_resource(j) for j in jobs])
 
 
-@router.get("/videos/{video_id}/content")
-async def retrieve_video_content(
+@public_router.get("/videos/{video_id}", response_model=VideoResource)
+async def retrieve_video(
     video_id: str, session: AsyncSession = Depends(get_session)
+) -> VideoResource:
+    """Report the state of one job.
+
+    Public: the job id is the capability, so a caller that only knows the
+    id can poll for the result without holding an API key.
+    """
+    job = await session.get(VideoJob, video_id)
+    if job is None:
+        raise openai_error(404, f"video {video_id!r} not found", "invalid_request_error")
+    return job_to_resource(job)
+
+
+@public_router.get("/videos/{video_id}/content")
+async def retrieve_video_content(
+    video_id: str,
+    request: Request,
+    download: bool = False,
+    session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Stream the generated MP4."""
+    """Stream the generated MP4.
+
+    Public: this URL is what gets handed to a browser, a player or a
+    third-party page, and those callers have no API key to present. The
+    unguessable job id is the credential.
+
+    The clip is served `inline` so it can be used directly as a `<video>`
+    source; pass `?download=true` to force a file download instead.
+    """
     job = await session.get(VideoJob, video_id)
     if job is None:
         raise openai_error(404, f"video {video_id!r} not found", "invalid_request_error")
@@ -162,26 +185,54 @@ async def retrieve_video_content(
             "invalid_request_error",
         )
 
+    disposition = "attachment" if download else "inline"
+    filename = f"{video_id}.mp4"
+
     settings = get_settings()
     if job.local_path:
         path = settings.storage_dir / job.local_path
         if path.exists():
-            return Response(
-                content=path.read_bytes(),
+            # `FileResponse` streams the file and answers `Range` requests, so
+            # a browser <video> player can seek without pulling the whole
+            # clip into memory first.
+            return FileResponse(
+                path,
                 media_type="video/mp4",
-                headers={"Content-Disposition": f'attachment; filename="{video_id}.mp4"'},
+                filename=filename,
+                content_disposition_type=disposition,
             )
 
     if job.upstream_url:
         import httpx
 
+        # The local copy has been cleaned up, so the clip is fetched from
+        # the upstream CDN. A `Range` header is passed on, so a player can
+        # still seek without pulling the whole file.
+        range_header = request.headers.get("range")
+        headers = {"Range": range_header} if range_header else {}
+
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as c:
-            upstream = await c.get(job.upstream_url)
-            if upstream.status_code == 200:
+            upstream = await c.get(job.upstream_url, headers=headers)
+            if upstream.status_code in (200, 206):
+                content = upstream.content
                 return Response(
-                    content=upstream.content,
+                    content=content,
+                    status_code=upstream.status_code,
                     media_type="video/mp4",
-                    headers={"Content-Disposition": f'attachment; filename="{video_id}.mp4"'},
+                    headers={
+                        "Content-Disposition": f'{disposition}; filename="{filename}"',
+                        "Content-Length": str(len(content)),
+                        **(
+                            {"Content-Range": upstream.headers["content-range"]}
+                            if "content-range" in upstream.headers
+                            else {}
+                        ),
+                        **(
+                            {"Accept-Ranges": "bytes"}
+                            if upstream.headers.get("accept-ranges")
+                            else {}
+                        ),
+                    },
                 )
 
     raise openai_error(

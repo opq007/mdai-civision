@@ -31,7 +31,7 @@
             <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
             <td>
               {% if j.status == 'completed' %}
-                <a href="/v1/videos/{{ j.id }}/content" class="btn ghost sm">Download</a>
+                <a href="/v1/videos/{{ j.id }}/content?download=true" class="btn ghost sm">Download</a>
               {% elif j.error_message %}
                 <span class="muted" title="{{ j.error_message }}">error</span>
               {% endif %}

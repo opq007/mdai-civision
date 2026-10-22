@@ -61,6 +61,14 @@ app.include_router(
     prefix="/v1",
     dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)],
 )
+# The status and download routes are open: a caller that only knows a job id
+# can poll it and fetch the MP4 without an API key. The unguessable job id
+# is the credential, and the rate limit still applies.
+app.include_router(
+    videos.public_router,
+    prefix="/v1",
+    dependencies=[Depends(enforce_rate_limit)],
+)
 
 
 @app.middleware("http")
