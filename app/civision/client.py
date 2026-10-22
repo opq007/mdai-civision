@@ -208,10 +208,12 @@ class CivisionClient:
             raise UpstreamUnavailable(f"upstream returned {r.status_code}")
 
         # openapi envelope
-        if isinstance(body, dict) and "success" in body and "data" in body:
+        if isinstance(body, dict) and "success" in body:
             if body.get("success") is False:
                 raise cls._business_error(body)
-            return body.get("data")
+            if "data" in body:
+                return body.get("data")
+            return body
 
         # api/v1 envelope
         if isinstance(body, dict) and "Code" in body:
@@ -337,6 +339,7 @@ class CivisionClient:
         guidance_scale: float = 7.5,
         num_inference_steps: int = 50,
         accelerate_lora: bool | None = None,
+        image_input: str | None = None,
     ) -> float:
         """Ask upstream how many magicubes a request would cost.
 
@@ -364,6 +367,10 @@ class CivisionClient:
                 "accelerate_lora": accelerate_lora,
                 "references": [],
             }
+        if image_input:
+            # Image-to-video needs the first frame, otherwise upstream rejects
+            # the request with "IMG_2_VIDEO 必须提供首帧图片".
+            inner["image_input_front_args"] = {"image": image_input}
 
         body = {"type": "VIDEO", "mode": "custom", "video_predict_task_request": inner}
         data = await self._request(
@@ -406,7 +413,9 @@ class CivisionClient:
             "modelArgs": {"checkpointModelVersionId": version_id, "loraArgs": []},
         }
         if image_input:
-            body["imageInputFrontArgs"] = [image_input]
+            # A single object with an "image" key, not a list. Upstream rejects
+            # the array form outright.
+            body["imageInputFrontArgs"] = {"image": image_input}
         if accelerate_lora is not None:
             # Only MiniMax-H3 accepts this block; other models reject it with
             # "videoInferenceArgs 仅支持 MiniMax-H3".

@@ -100,6 +100,41 @@ Do not hard-code model lists, size sliders or durations. They are pulled from
 `/api/v1/muse/predict/unauth/defaultTemplateV2` and cached for five minutes.
 `tests/test_mapping.py` carries a trimmed copy for unit tests only.
 
+### Only three models are exposed
+
+`ALLOWED_MODELS` in `app/civision/mapping.py` holds the three upstream models
+this service offers:
+
+- `WAN_VIDEO_2_1_T2V_1_3_B` - Wan2.1-T2V-1.3B, text to video
+- `WAN_VIDEO_2_1_I2V_14_B` - Wan2.1-I2V-14B-720P, image to video
+- `MINIMAX_H3` - MiniMax-H3, text / image / first-last frame
+
+The other five upstream models are filtered out. `sora-2` and `sora-2-pro`
+are aliases onto the first and the third.
+
+The cost table in `app/civision/costs.py` was measured with the free
+`estimate-quota` endpoint. It is keyed by civision value, so a newly allowed
+model has no costs until they are measured and added.
+
+### Image-to-video needs an uploaded reference
+
+`IMG_2_VIDEO` is rejected by upstream unless the request carries the first
+frame. The service therefore uploads the caller's `input_reference` to
+ModelScope's own storage first:
+
+```
+POST /api/v1/rm/uploadUrl   {FileName, Type}  -> Data.UploadUrl
+PUT  <UploadUrl>            raw bytes          (x-oss-meta-author: aliy)
+POST /api/v1/rm/downloadUrl {FileUrl, Type}    -> Data.DownloadUrl
+```
+
+`app/civision/upload.py` does this. Two traps:
+
+- `image_input_front_args` is a **single object** with an `image` key, not a
+  list. Upstream rejects the array form.
+- the upload endpoints use the api/v1 envelope (`Data`), not the openapi one
+  (`data`)
+
 ### Model quirks live on the model, not in the caller
 
 MiniMax-H3 is the odd one out:

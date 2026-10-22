@@ -53,6 +53,38 @@
       </table>
     </div>
 
+    <h2>Magicube cost</h2>
+    <div class="card">
+      <p style="margin-top:0">
+        Measured with the upstream quota estimator, which is the same number
+        the civision page quotes. Cost follows the pixel count of the size and
+        the duration.
+      </p>
+      <table>
+        <thead><tr><th>Model</th><th>Size</th><th>3s</th><th>5s</th><th>10s</th></tr></thead>
+        <tbody>
+        {% for line in cost_lines %}
+          <tr>
+            {% if line.first_of_model %}
+              <td style="vertical-align:top">
+                {{ line.label }}<br><span class="muted mono">{{ line.model }}</span>
+              </td>
+            {% endif %}
+            <td class="mono">{{ line.width }}×{{ line.height }}</td>
+            <td>{{ line.cost3 if line.cost3 is not none else '—' }}</td>
+            <td>{{ line.cost5 if line.cost5 is not none else '—' }}</td>
+            <td>{{ line.cost10 if line.cost10 is not none else '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="hint">
+        The civision page hides the 10 second option for the Wan models
+        ("stay tuned"), but the endpoint accepts it. The service follows the
+        page and only offers 10 seconds on MiniMax-H3.
+      </p>
+    </div>
+
     <h2>Supported sizes</h2>
     <div class="card">
       <p style="margin-top:0">

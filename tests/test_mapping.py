@@ -6,6 +6,7 @@ import pytest
 
 from app.civision.client import parse_cookie_header
 from app.civision.mapping import (
+    ALLOWED_MODELS,
     build_catalog,
     normalize_model_name,
     resolve_model,
@@ -48,9 +49,9 @@ SAMPLE_CATALOG = [
         },
     },
     {
-        "value": "WAN_VIDEO_2_2_I2V_A_14_B",
-        "sub_label": "Wan2.2-I2V-A14B",
-        "versionId": 647,
+        "value": "WAN_VIDEO_2_1_I2V_14_B",
+        "sub_label": "Wan2.1-I2V-14B-720P",
+        "versionId": 648,
         "supportType": ["IMG_2_VIDEO"],
         "defaultParams": {
             "basicDiffusionArgs": {
@@ -259,7 +260,7 @@ class TestModelResolution:
         assert resolve_model("gpt-4", models) is None
 
     def test_capabilities(self, models):
-        i2v = resolve_model("wan2.2-i2v-a14b", models)
+        i2v = resolve_model("wan2.1-i2v-14b", models)
         assert i2v.supports_img2video and not i2v.supports_txt2video
         h3 = resolve_model("minimax-h3", models)
         assert h3.supports_txt2video and h3.supports_img2video and h3.supports_flf2video
@@ -289,7 +290,7 @@ class TestAccelerateLora:
         assert h3.default_steps == 4
 
     def test_other_models_do_not_use_it(self, models):
-        for name in ("sora-2", "wan2.1-t2v-1.3b", "wan2.2-i2v-a14b"):
+        for name in ("sora-2", "wan2.1-t2v-1.3b", "wan2.1-i2v-14b"):
             m = resolve_model(name, models)
             assert m.accelerate_lora is False
             assert m.default_steps == 50
@@ -307,3 +308,59 @@ class TestEstimateMatchesTheCivisionPage:
 
     def test_known_values(self):
         assert dict(self.H3_768x1280) == {3: 34, 5: 56, 10: 113}
+
+
+class TestAllowList:
+    """Only three models are exposed; upstream offers eight."""
+
+    def test_only_allowed_models_are_exposed(self, models):
+        exposed = {m.civision_value for m in models}
+        assert exposed <= set(ALLOWED_MODELS)
+        assert "WAN_VIDEO_2_1_T2V_1_3_B" in exposed
+        assert "WAN_VIDEO_2_1_I2V_14_B" in exposed
+        assert "MINIMAX_H3" in exposed
+
+    def test_disallowed_models_are_hidden(self):
+        catalog = SAMPLE_CATALOG + [
+            {
+                "value": "WAN_VIDEO_2_2_T2V_A_14_B",
+                "sub_label": "Wan2.2-T2V-A14B",
+                "versionId": 557,
+                "supportType": ["TXT_2_VIDEO"],
+                "defaultParams": {"basicDiffusionArgs": {}},
+                "videoSizeSlider": {"large": []},
+            }
+        ]
+        built = build_catalog(catalog, {})
+        values = {m.civision_value for m in built}
+        assert "WAN_VIDEO_2_2_T2V_A_14_B" not in values
+        assert resolve_model("wan2.2-t2v-a14b", built) is None
+
+
+class TestCostTable:
+    """The measured magicube costs, keyed by civision model value."""
+
+    def test_every_exposed_model_has_costs(self, models):
+        from app.civision.costs import lines_for
+
+        for m in models:
+            if m.requested.startswith("sora-"):
+                continue  # an alias points at a model that is already listed
+            assert lines_for(m), f"no cost table for {m.civision_value}"
+
+    def test_lookup_matches_the_table(self, models):
+        from app.civision.costs import lookup
+
+        wan = resolve_model("wan2.1-t2v-1.3b", models)
+        assert lookup(wan, 480, 480, 3) == 2
+        assert lookup(wan, 720, 1280, 5) == 6
+
+        h3 = resolve_model("minimax-h3", models)
+        assert lookup(h3, 768, 1280, 3) == 34
+        assert lookup(h3, 768, 1280, 10) == 113
+
+    def test_unknown_combination_has_no_cost(self, models):
+        from app.civision.costs import lookup
+
+        wan = resolve_model("wan2.1-t2v-1.3b", models)
+        assert lookup(wan, 123, 456, 3) is None

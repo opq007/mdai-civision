@@ -131,7 +131,7 @@ GET /api/v1/auth/login/generate/oauth2/url
 >
 > **由此得出的实现结论**：浏览器仅用于**首次授权与凭据采集**；运行期是纯 HTTP 反代。
 
-### 1.5 视频模型目录（实测，8 个）
+### 1.5 视频模型目录（上游共 8 个，本服务只开放 3 个）
 
 来源：`GET /api/v1/muse/predict/unauth/defaultTemplateV2` → `data.VIDEO.supportSDVersionList`
 
@@ -154,6 +154,21 @@ GET /api/v1/auth/login/generate/oauth2/url
 默认参数（实测）：`guidanceScale` 7.5（Wan）/ 4.0（MiniMax-H3）、`numInferenceSteps` 50（Wan）/ 20（H3）、`totalSeconds` 3（默认值，实际由 UI 调整）、`seed` -1。
 
 > 注：目录是**实时**的，不硬编码 —— 后台按上述接口拉取并缓存。
+
+**本服务只暴露 3 个模型**（`app/civision/mapping.py` 的 `ALLOWED_MODELS`）：
+
+| 公用名 | civision 值 | versionId | 能力 | 时长 |
+|---|---|---|---|---|
+| `wan2.1-t2v-1.3b` | `WAN_VIDEO_2_1_T2V_1_3_B` | 546 | 文生视频 | 3 / 5 秒 |
+| `wan2.1-i2v-14b` | `WAN_VIDEO_2_1_I2V_14_B` | 648 | **图生视频** | 3 / 5 秒 |
+| `minimax-h3` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 |
+
+外加两个 OpenAI 别名：`sora-2` → `wan2.1-t2v-1.3b`，`sora-2-pro` → `minimax-h3`。
+
+其余 5 个上游模型（Wan2.1 T2V-14B、Wan2.1 FLF2V-14B、Wan2.2 TI2V-5B、
+Wan2.2 T2V-A14B、Wan2.2 I2V-A14B）不对外暴露。
+
+---
 
 ### 1.6 魔粒（MagicCube）
 
@@ -190,27 +205,61 @@ GET /api/v1/auth/login/generate/oauth2/url
 **实测扣费**：4s / 480×480 / Wan2.1-T2V-1.3B → 预估 2 魔粒，实际余额 300 → 298，**完全一致**。
 可见消耗并非固定 1 魔粒/次，而与**时长 / 分辨率**相关（4s 低分辨率 = 2 魔粒）。
 
-### 1.7 OpenAI 目标契约（取自官方 OpenAPI spec v2.3.0）
+### 1.7 完整魔粒消耗表（实测）
 
-```
-POST /v1/videos                       → 200 VideoResource
-GET  /v1/videos/{video_id}            → 200 VideoResource
-GET  /v1/videos/{video_id}/content    → 200 video/mp4 (binary)
-GET  /v1/videos                       → 列表
-DELETE /v1/videos/{video_id}
-```
+用免费的 `estimate-quota` 端点，按网页实际发送的参数测得，与网页显示一致。
+后台「Models」页展示同一张表（`app/civision/costs.py`）。
 
-`VideoResource` 必填字段：
-`id, object("video"), model, status, progress, created_at, completed_at, expires_at, prompt, size, seconds, remixed_from_video_id, error`
+**Wan2.1-T2V-1.3B（文生视频，versionId 546）**
 
-- `status` 枚举：`queued` | `in_progress` | `completed` | `failed`
-- `model` 枚举：`sora-2` | `sora-2-pro` | `sora-2-2025-10-06` | `sora-2-pro-2025-10-06` | `sora-2-2025-12-08`
-- `seconds` 枚举：`"4"` | `"8"` | `"12"`
-- `size` 枚举：`720x1280` | `1280x720` | `1024x1792` | `1792x1024`
-- 请求体：`model` / `prompt`(1..32000) / `input_reference{image_url|file_id}` / `seconds` / `size`；支持 `multipart/form-data` 与 `application/json`
-- `input_reference.image_url` 支持完整 URL 或 base64 data URL
+| 尺寸 | 3s | 5s | 10s |
+|---|---|---|---|
+| 720×1280 | 3 | 6 | 11 |
+| 720×960 | 3 | 6 | 11 |
+| 720×720 | 3 | 6 | 11 |
+| 960×720 | 3 | 6 | 11 |
+| 1280×720 | 3 | 6 | 11 |
+| 480×848 | 3 | 6 | 11 |
+| 480×640 | 2 | 3 | 5 |
+| 480×480 | 2 | 3 | 5 |
+| 640×480 | 2 | 3 | 5 |
+| 848×480 | 3 | 6 | 11 |
 
-### 1.7 实测补充：魔粒结算与耗时
+**Wan2.1-I2V-14B（图生视频，versionId 648）**
+
+| 尺寸 | 3s | 5s | 10s |
+|---|---|---|---|
+| 720×1280 | 17 | 28 | 56 |
+| 720×960 | 17 | 28 | — |
+| 720×720 | 17 | 28 | — |
+| 960×720 | 17 | 28 | — |
+| 1280×720 | 17 | 28 | 56 |
+| 480×848 | 17 | 28 | 56 |
+| 480×640 | 8 | 13 | 25 |
+| 480×480 | 8 | 13 | 25 |
+| 640×480 | 8 | 13 | 25 |
+| 848×480 | 17 | 28 | 56 |
+
+**MiniMax-H3（versionId 150867，LoRA 加速开启，4 步）**
+
+| 尺寸 | 3s | 5s | 10s |
+|---|---|---|---|
+| 768×1280 | 34 | 56 | 113 |
+| 768×960 | 34 | 56 | 113 |
+| 768×768 | 34 | 56 | 113 |
+| 960×768 | 34 | 56 | 113 |
+| 1280×768 | 34 | 56 | 113 |
+
+**规律**：消耗只取决于**像素总量**和**时长**，与具体宽高比无关。
+三个「小」尺寸（480×640 / 480×480 / 640×480）比其他尺寸便宜约 1/2。
+
+> ⚠️ **10 秒**：网页对 Wan 系列**隐藏**了这个选项（标注「敬请期待」），但接口实际接受。
+> 表格中已列出实测值；**服务层仍只对 MiniMax-H3 开放 10 秒**，与网页行为一致。
+> 表格中「—」表示该组合未单独测量（与同像素档位同价）。
+
+---
+
+### 1.8 实测补充：魔粒结算与耗时
 
 | 组合 | 预估 | 实际扣减 | 耗时 |
 |---|---|---|---|
@@ -259,6 +308,26 @@ civision 页面为 MiniMax-H3 提供一个 *LoRA acceleration* 开关，
 > **上游不返回真实进度**：`progress.percent` 在处理中恒为 `null`，
 > 只能在任务结束时拿到 100。服务端按耗时做饱和曲线估算（上限 95%），
 > 否则客户端会看到一个卡在 95% 的进度条。
+
+### 1.9 OpenAI 目标契约（取自官方 OpenAPI spec v2.3.0）
+
+```
+POST /v1/videos                       → 200 VideoResource
+GET  /v1/videos/{video_id}            → 200 VideoResource
+GET  /v1/videos/{video_id}/content    → 200 video/mp4 (binary)
+GET  /v1/videos                       → 列表
+DELETE /v1/videos/{video_id}
+```
+
+`VideoResource` 必填字段：
+`id, object("video"), model, status, progress, created_at, completed_at, expires_at, prompt, size, seconds, remixed_from_video_id, error`
+
+- `status` 枚举：`queued` | `in_progress` | `completed` | `failed`
+- `model` 枚举：`sora-2` | `sora-2-pro` | `sora-2-2025-10-06` | `sora-2-pro-2025-10-06` | `sora-2-2025-12-08`
+- `seconds` 枚举：`"4"` | `"8"` | `"12"`
+- `size` 枚举：`720x1280` | `1280x720` | `1024x1792` | `1792x1024`
+- 请求体：`model` / `prompt`(1..32000) / `input_reference{image_url|file_id}` / `seconds` / `size`；支持 `multipart/form-data` 与 `application/json`
+- `input_reference.image_url` 支持完整 URL 或 base64 data URL
 
 ---
 

@@ -12,6 +12,7 @@ import asyncio
 import datetime as dt
 import logging
 import time
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -34,6 +35,7 @@ from app.civision.client import (
     NotAuthenticated,
     RateLimited,
 )
+from app.civision.upload import upload_image
 from app.config import get_settings
 from app.db import session_scope
 from app.models import Account, UsageLog, VideoJob, utcnow
@@ -81,12 +83,20 @@ async def _load_spec(job_id: str) -> Optional[JobSpec]:
         )
 
 
-async def _prepare_image_input(spec: JobSpec) -> Optional[dict]:
-    """Turn an OpenAI `input_reference` into something civision accepts."""
+async def _prepare_image_input(
+    spec: JobSpec, client: CivisionClient
+) -> Optional[str]:
+    """Turn an OpenAI `input_reference` into a URL ModelScope can fetch.
+
+    Returns the image URL, or None for a text-to-video job. Base64 data and
+    local files are uploaded to ModelScope's own storage first, because
+    upstream has to be able to download the reference image.
+    """
     if not spec.input_reference_url:
         return None
 
     url = spec.input_reference_url
+
     if url.startswith("data:"):
         import base64
 
@@ -97,13 +107,16 @@ async def _prepare_image_input(spec: JobSpec) -> Optional[dict]:
             raw = base64.b64decode(payload)
         except Exception as exc:  # noqa: BLE001
             raise InvalidRequest(f"input_reference is not valid base64: {exc}") from exc
-        settings = get_settings()
-        settings.storage_dir.mkdir(parents=True, exist_ok=True)
-        tmp = settings.storage_dir / f"ref_{spec.job_id}.png"
-        tmp.write_bytes(raw)
-        return {"url": tmp.as_uri()}
+        return await upload_image(client, raw, f"ref_{spec.job_id}.png")
 
-    return {"url": url}
+    if url.startswith(("http://", "https://")):
+        return url
+
+    # A local path: upload the bytes.
+    path = Path(url)
+    if not path.exists():
+        raise InvalidRequest(f"input_reference file not found: {url}")
+    return await upload_image(client, path.read_bytes(), path.name)
 
 
 async def _download(url: str, destination) -> int:
@@ -156,15 +169,11 @@ async def run_job(job_id: str) -> None:
         jobs_failed_total.inc()
         return
 
-    try:
-        image_input = await _prepare_image_input(spec)
-    except InvalidRequest as exc:
-        await _fail(job_id, "invalid_request_error", str(exc))
-        await _log_usage(job_id, None, "failed", str(exc))
-        jobs_failed_total.inc()
-        return
-
-    predict_type = "IMG_2_VIDEO" if image_input else "TXT_2_VIDEO"
+    # The reference image has to be uploaded to ModelScope's own storage
+    # before it can be referenced, and that needs an account's session, so
+    # it happens per account below.
+    wants_image = bool(spec.input_reference_url)
+    predict_type = "IMG_2_VIDEO" if wants_image else "TXT_2_VIDEO"
     attempts = 0
     last_error: Optional[str] = None
 
@@ -198,7 +207,7 @@ async def run_job(job_id: str) -> None:
             continue
 
         try:
-            await _run_with_account(job_id, spec, account, model, predict_type, image_input)
+            await _run_with_account(job_id, spec, account, model, predict_type)
             await _log_usage(job_id, account, "completed", None)
             return
         except (NotAuthenticated, InsufficientBalance, RateLimited) as exc:
@@ -261,7 +270,6 @@ async def _run_with_account(
     account: Account,
     model,
     predict_type: str,
-    image_input: Optional[dict],
 ) -> None:
     """Submit, poll and download using one specific account."""
 
@@ -279,6 +287,10 @@ async def _run_with_account(
     try:
         client = CivisionClient(jar=jar, proxy=proxy_url(proxy))
 
+        image_input = None
+        if spec.input_reference_url:
+            image_input = await _prepare_image_input(spec, client)
+
         await _sleep_until_next_submit(last_used)
 
         try:
@@ -292,6 +304,7 @@ async def _run_with_account(
                 guidance_scale=spec.guidance_scale,
                 num_inference_steps=spec.num_inference_steps,
                 accelerate_lora=model.accelerate_lora or None,
+                image_input=image_input,
             )
         except Exception:  # noqa: BLE001
             estimate = 0.0

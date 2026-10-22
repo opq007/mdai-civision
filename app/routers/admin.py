@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.civision import costs
 from app.civision.accounts import (
     add_account_from_cookies,
     assign_proxy,
@@ -375,7 +376,18 @@ async def models_page(
     return templates.TemplateResponse(
         request,
         "models.html",
-        {"catalog": catalog, "aliases": aliases, "message": None},
+        {
+            "catalog": catalog,
+            "aliases": aliases,
+            # One block per real model; the aliases point at the same ones.
+            "cost_lines": [
+                line
+                for m in catalog.models
+                if not m.requested.startswith("sora-")
+                for line in costs.lines_for(m)
+            ],
+            "message": None,
+        },
     )
 
 

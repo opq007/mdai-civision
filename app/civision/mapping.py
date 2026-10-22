@@ -59,6 +59,20 @@ NATIVE_SIZES: dict[str, tuple[int, int]] = {
 DEFAULT_OPENAI_MODEL = "sora-2"
 DEFAULT_PRO_MODEL = "sora-2-pro"
 
+# The models this service exposes. Upstream offers eight video models; the
+# rest are not worth the surface area.
+#
+#   wan2.1-t2v-1.3b  - cheapest text-to-video
+#   wan2.1-i2v-14b   - image-to-video
+#   minimax-h3       - supports text, image and first/last-frame video
+#
+# Add a civision value here to expose it again.
+ALLOWED_MODELS: tuple[str, ...] = (
+    "WAN_VIDEO_2_1_T2V_1_3_B",
+    "WAN_VIDEO_2_1_I2V_14_B",
+    "MINIMAX_H3",
+)
+
 # OpenAI seconds -> civision `totalSeconds`. The civision page offers 3, 5
 # and 10 seconds; 10 is only available for MiniMax-H3.
 OPENAI_SECONDS_MAP: dict[int, int] = {4: 3, 8: 5, 12: 10}
@@ -72,7 +86,7 @@ ACCELERATED_STEPS = 4
 
 # Fallbacks when the alias table has not been seeded yet.
 DEFAULT_ALIASES: dict[str, str] = {
-    "sora-2": "WAN_VIDEO_2_2_T2V_A_14_B",
+    "sora-2": "WAN_VIDEO_2_1_T2V_1_3_B",
     "sora-2-pro": "MINIMAX_H3",
 }
 
@@ -241,13 +255,14 @@ def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[Resolved
 
     resolved: list[ResolvedModel] = []
     for m in catalog:
-        if not m.get("value"):
+        value = m.get("value")
+        if not value or value not in ALLOWED_MODELS:
             continue
-        resolved.append(make(normalize_model_name(m["value"]), m))
+        resolved.append(make(normalize_model_name(value), m))
 
     for alias, target_value in aliases.items():
         target_model = by_value.get(target_value)
-        if not target_model:
+        if not target_model or target_value not in ALLOWED_MODELS:
             continue
         resolved.append(make(alias, target_model))
     return resolved
