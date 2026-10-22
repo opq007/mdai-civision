@@ -69,6 +69,10 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 docker compose up -d
 ```
 
+> 镜像默认包含 Chromium（约 400 MB），用于 GitHub OAuth 采集与无人工续期。
+> 如果你只用「粘贴 Cookie」添加账号，可以跳过它：
+> `docker compose build --build-arg INSTALL_BROWSER=false`
+
 打开 http://127.0.0.1:8000/admin ，用 `.env` 里的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录。
 
 ### 4. 创建 API Key 并调用

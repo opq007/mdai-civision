@@ -17,7 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 
-RUN playwright install chromium
+# Chromium is only needed for the GitHub OAuth capture (app/services/oauth.py)
+# and for unattended session renewal. If you only ever add accounts by pasting
+# the cookie string, build with --build-arg INSTALL_BROWSER=false to skip this
+# and save roughly 400 MB.
+ARG INSTALL_BROWSER=true
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+        playwright install chromium; \
+    fi
 
 COPY app ./app
 COPY tools ./tools
