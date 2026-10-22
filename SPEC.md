@@ -309,7 +309,71 @@ civision 页面为 MiniMax-H3 提供一个 *LoRA acceleration* 开关，
 > 只能在任务结束时拿到 100。服务端按耗时做饱和曲线估算（上限 95%），
 > 否则客户端会看到一个卡在 95% 的进度条。
 
-### 1.9 OpenAI 目标契约（取自官方 OpenAPI spec v2.3.0）
+### 1.9 首尾帧（FLF2V）—— 从 civision 前端源码逆向
+
+MiniMax-H3 的「首尾帧」开关在前端源码里的完整链路（bundle `index.es-zeJALGUe.js`）：
+
+1. 开关 `isOpenFrames` 打开后，上传区从单图切换成「首帧 / 尾帧」两个槽位，
+   两者可以互换（`g = () => { r(ea.START, t.end||[]); r(ea.END, t.start||[]) }`）。
+2. 组装请求体的函数（源码里的 `T_`）：
+
+   ```js
+   T_ = (start, end) => {
+     const body = { imageInputFrontArgs: { image: start?.[0]?.url,
+                                           ...(start?.[0]?.id ? {imageId: start[0].id} : {}),
+                                           stength: 1 } };
+     if (end?.length) {
+       body.extraImageInputFrontArgs = { image: end[0]?.url,
+                                         ...(end[0]?.id ? {imageId: end[0].id} : {}),
+                                         stength: 1 };
+     }
+     return body;
+   }
+   ```
+
+3. 该函数只在 `predictType === "IMG_2_VIDEO"` 时被调用
+   （`...Zi(i) ? T_(U, ee) : {}`，其中 `Zi = e => e === "IMG_2_VIDEO"`）。
+
+**关键结论（实测）**
+
+| 事实 | 证据 |
+|---|---|
+| 上游**没有** `FLF_2_VIDEO` 这个 predictType | Jackson 反序列化报错，枚举只接受 `[IMG_2_VIDEO, DIFFUSION, TXT_2_IMG, INPAINTING, TXT_2_AUDIO, TXT_2_VIDEO, IMG_2_IMG]` |
+| 首尾帧 = `IMG_2_VIDEO` + `extraImageInputFrontArgs` | `FLF_2_VIDEO` 只是**目录里的能力标记**，用于决定是否显示开关 |
+| `stength` 是上游自己的拼写 | 前端就这么写；实测上游忽略该字段（传对象/数组均不报错），但为了与页面一致仍然原样发送 |
+| `extraImageInputFrontArgs` 是**真实字段** | 传字符串会报 `Cannot construct instance of ImageInputFrontArgs` |
+| `imageId` 是**真实字段**（Long 类型） | 传字符串会报 `Cannot deserialize value of type java.lang.Long` |
+
+**`videoInferenceArgs` 的形状（实测）**
+
+上游的 `VideoInferenceArgs` 结构（用 Jackson 类型报错逐个探出来的）：
+
+```
+VideoInferenceArgs {
+  accelerateLora : Boolean          // 真实字段
+  mode           : Mode             // 枚举 [REF2VA, FL2VA]
+  references     : List<Reference>  // Reference 的字段未探出（宽松解析）
+}
+```
+
+⚠️ **不要显式设置 `mode`**。实测：
+
+| 请求 | 结果 |
+|---|---|
+| `videoInferenceArgs: {accelerateLora: true}` | ✅ 上游接受 |
+| `videoInferenceArgs: {mode: "REF2VA", accelerateLora: true}` | ❌ `MiniMax-H3 推理加速当前仅支持 FL2VA 模式` |
+| `videoInferenceArgs: {mode: "FL2VA", accelerateLora: true}` | ✅ 上游接受 |
+
+civision 页面**从不设置 `mode`**，只发 `{accelerateLora: P}`。
+本实现与页面保持一致，也**不设 `mode`、不带 `references`**。
+
+> 这条曾是一个真实缺陷：早期实现硬编码了 `mode: "REF2VA"`，
+> 导致 MiniMax-H3 的加速任务被上游直接拒绝。现已修正。
+
+**首尾帧的魔粒消耗 = 同尺寸同时长的单图任务**
+（768 档实测：3s=34、5s=56、10s=113，与单图完全一致）。
+
+### 1.10 OpenAI 目标契约（取自官方 OpenAPI spec v2.3.0）
 
 ```
 POST /v1/videos                       → 200 VideoResource
@@ -328,6 +392,9 @@ DELETE /v1/videos/{video_id}
 - `size` 枚举：`720x1280` | `1280x720` | `1024x1792` | `1792x1024`
 - 请求体：`model` / `prompt`(1..32000) / `input_reference{image_url|file_id}` / `seconds` / `size`；支持 `multipart/form-data` 与 `application/json`
 - `input_reference.image_url` 支持完整 URL 或 base64 data URL
+- **扩展（非 OpenAI 标准）**：`input_reference_end{image_url|file_id}`
+  —— 首尾帧的尾帧。仅 `supportType` 含 `FLF_2_VIDEO` 的模型接受，
+  且必须同时给 `input_reference`，否则 400。
 
 ---
 
@@ -542,6 +609,17 @@ civision 每个模型支持的宽高不同，因此尺寸不是全局查表，�
 
 **约束**：只有 `supportType` 含 `IMG_2_VIDEO` 的模型可接收；否则返回 400 并说明原因。
 
+### 3.8 首尾帧（扩展，非 OpenAI 标准）
+
+`input_reference_end` 接受与 `input_reference` 相同的取值，用于 MiniMax-H3 的
+「首尾帧」模式。两张图分别进入 `imageInputFrontArgs` 与
+`extraImageInputFrontArgs`，与 civision 页面发出的请求体一致（详见 §1.9）。
+
+**约束**：
+- 只有 `supportType` 含 `FLF_2_VIDEO` 的模型可接收；否则 400（`param=input_reference_end`）。
+- 必须同时提供 `input_reference`；只给尾帧返回 400（`param=input_reference`）。
+- 魔粒消耗与同尺寸同时长的单图任务相同。
+
 ---
 
 ## 4. 账号与会话管理
@@ -735,9 +813,10 @@ civision 每个模型支持的宽高不同，因此尺寸不是全局查表，�
 | 2 | 1080p / 更大尺寸的魔粒消耗 | 费率预估准确度 | 后台实际用量统计（已知 720×1280 = 23 魔粒） |
 | 3 | `totalSeconds` 8 / 12 的实际耗时与消耗 | seconds 映射 | 提交试跑 |
 | 4 | 图生视频（IMG_2_VIDEO）的完整链路与图片上传方式 | `input_reference` 支持 | 用真实图片试跑 |
-| 5 | MiniMax-H3 专属的 `videoInferenceArgs` 语义 | FLF2V / 多参考图能力 | 单独试跑 |
+| 5 | MiniMax-H3 专属的 `videoInferenceArgs` 语义 | FLF2V / 多参考图能力 | ✅ 已用免费预估端点确认（§1.9），仅剩真实出片未验 |
 | 6 | 提交频率限制的精确阈值（实测 ~40s） | 限流退避策略 | 逐步加压测试 |
 | 7 | 大模型的最长耗时 | 轮询超时 | 已知 14B@720p > 25 min |
+| 8 | 首尾帧真实出片（两张真图） | `input_reference_end` 端到端 | 请求体已与网页逐字段对齐并通过预估端点校验 |
 
 ### 8.3 实现期间发现的坑
 
@@ -752,6 +831,11 @@ civision 每个模型支持的宽高不同，因此尺寸不是全局查表，�
 | Chromium 自带 Cookie 库不可靠 | 重启后 `m_session_id` 丢失 | 改用显式 `storage_state.json` 快照 |
 | 进程重启后 `running_jobs` 泄漏 | 所有账号看起来都在忙，队列卡死 | 启动时清零计数器 |
 | 任务跨重启会被重复提交 | 白白消耗魔粒 | 记录 `upstream_task_id`，重启后接着轮询 |
+| 上游没有 `FLF_2_VIDEO` 这个 predictType | 直接发 `predictType: "FLF_2_VIDEO"` 会被 Jackson 拒绝 | 首尾帧 = `IMG_2_VIDEO` + `extraImageInputFrontArgs`（§1.9） |
+| `videoInferenceArgs.mode` 不能显式设成 `REF2VA` | 上游报「MiniMax-H3 推理加速当前仅支持 FL2VA 模式」 | 跟网页一致：只发 `{accelerateLora}`，不带 `mode` / `references` |
+| `stength` 是上游自己的拼写 | 传 `strength` 也能过，但与网页不一致 | 原样发 `stength`（§1.9） |
+| 依赖函数返回 Response 不会短路路由 | FastAPI 仍会执行 endpoint | 后台未登录改为抛 `AdminLoginRequired`，由全局处理器转 303 |
+| 测试与开发服务共用同一个数据库 | 测试留下的 job 行会被服务端 worker 捡起 → 真实生成 → 真实扣魔粒 | `tests/conftest.py` 把 `DATABASE_URL` 指向临时文件 |
 
 ---
 

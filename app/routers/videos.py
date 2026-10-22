@@ -61,7 +61,23 @@ async def create_video(
     except ValueError as exc:
         raise openai_error(400, str(exc), "invalid_request_error") from exc
 
-    if body.input_reference is not None:
+    if body.input_reference_end is not None:
+        if not model.supports_flf2video:
+            raise openai_error(
+                400,
+                f"model {model.requested!r} does not support a first-to-last-frame "
+                "job; pass only input_reference",
+                "invalid_request_error",
+                param="input_reference_end",
+            )
+        if body.input_reference is None:
+            raise openai_error(
+                400,
+                "input_reference_end needs a first frame; pass input_reference too",
+                "invalid_request_error",
+                param="input_reference",
+            )
+    elif body.input_reference is not None:
         if not model.supports_image_input:
             raise openai_error(
                 400,
@@ -100,6 +116,8 @@ async def create_video(
     )
     if body.input_reference and body.input_reference.image_url:
         job.input_reference_url = body.input_reference.image_url
+    if body.input_reference_end and body.input_reference_end.image_url:
+        job.input_reference_end_url = body.input_reference_end.image_url
 
     session.add(job)
     await session.flush()

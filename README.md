@@ -75,6 +75,9 @@ docker compose up -d
 
 打开 http://127.0.0.1:8000/admin ，用 `.env` 里的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录。
 
+> 未登录时访问 `/admin` 会**跳转到 `/admin/login`** 登录页（浏览器看到的是表单，
+> 不是 JSON 报错）。直接访问 http://127.0.0.1:8000/admin/login 也可以。
+
 ### 4. 创建 API Key 并调用
 
 在 **API keys** 页面创建一把 key（明文只显示一次），然后：
@@ -192,6 +195,30 @@ Wan 系列有两档（720 档 / 480 档），MiniMax-H3 只有 768 档：
 该比例不存在则回退到模型默认尺寸。
 
 额外也接受 civision 的原生宽高（如 `480x480`、`960x720`、`720x960`）。
+
+### 首尾帧（MiniMax-H3）
+
+上游没有 `FLF_2_VIDEO` 这个 predictType —— 网页的「首尾帧」开关，实质是
+`IMG_2_VIDEO` 加上第二张图。本服务对应地多接受一个 `input_reference_end`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/videos \
+  -H "Authorization: Bearer sk-civ-..." \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "minimax-h3",
+    "prompt": "the bird flies away",
+    "seconds": "8",
+    "size": "720x1280",
+    "input_reference":      {"image_url": "https://example.com/start.png"},
+    "input_reference_end":  {"image_url": "https://example.com/end.png"}
+  }'
+```
+
+两张图分别进上游的 `imageInputFrontArgs` 与 `extraImageInputFrontArgs`，
+和网页发出的请求体一致。`input_reference_end` 是**扩展字段**，不在 OpenAI
+标准里；只有 `minimax-h3` 接受，且必须同时给 `input_reference`，
+否则返回 400。魔粒消耗与同尺寸同时长的单图任务相同。
 
 ### 错误语义
 

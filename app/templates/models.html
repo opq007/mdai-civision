@@ -85,6 +85,35 @@
       </p>
     </div>
 
+    <h2>First-to-last-frame</h2>
+    <div class="card">
+      <p style="margin-top:0">
+        MiniMax-H3 can interpolate between two frames. Pass a start frame in
+        <code>input_reference</code> and an end frame in
+        <code>input_reference_end</code>; the second image goes upstream in the
+        <code>extraImageInputFrontArgs</code> block, exactly as the civision
+        page sends it.
+      </p>
+      <table>
+        <thead><tr><th>Model</th><th>Supports first-to-last-frame</th></tr></thead>
+        <tbody>
+        {% for m in catalog.models %}
+          {% if not m.requested.startswith('sora-') %}
+            <tr>
+              <td class="mono">{{ m.requested }}</td>
+              <td>{{ 'yes' if m.supports_flf2video else '—' }}</td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+        </tbody>
+      </table>
+      <p class="hint">
+        The cost is the same as a single-image job at the same size and
+        duration: MiniMax-H3 is 34 magicubes for 3 seconds, 56 for 5 and 113
+        for 10, at every size.
+      </p>
+    </div>
+
     <h2>Supported sizes</h2>
     <div class="card">
       <p style="margin-top:0">

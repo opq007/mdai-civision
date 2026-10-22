@@ -62,6 +62,7 @@ class JobSpec:
     guidance_scale: float
     num_inference_steps: int
     input_reference_url: Optional[str]
+    input_reference_end_url: Optional[str] = None
 
 
 async def _load_spec(job_id: str) -> Optional[JobSpec]:
@@ -80,23 +81,37 @@ async def _load_spec(job_id: str) -> Optional[JobSpec]:
             guidance_scale=job.guidance_scale,
             num_inference_steps=job.num_inference_steps,
             input_reference_url=job.input_reference_url,
+            input_reference_end_url=job.input_reference_end_url,
         )
 
 
 async def _prepare_image_input(
     spec: JobSpec, client: CivisionClient
-) -> Optional[str]:
-    """Turn an OpenAI `input_reference` into a URL ModelScope can fetch.
+) -> tuple[Optional[str], Optional[str]]:
+    """Turn the OpenAI reference images into URLs ModelScope can fetch.
 
-    Returns the image URL, or None for a text-to-video job. Base64 data and
-    local files are uploaded to ModelScope's own storage first, because
-    upstream has to be able to download the reference image.
+    Returns the (start, end) image URLs. Both are None for a text-to-video
+    job. Base64 data and local files are uploaded to ModelScope's own storage
+    first, because upstream has to be able to download the reference image.
     """
     if not spec.input_reference_url:
-        return None
+        return None, None
 
-    url = spec.input_reference_url
+    start = await _resolve_image_url(spec.input_reference_url, client, spec.job_id)
 
+    end = None
+    if spec.input_reference_end_url:
+        end = await _resolve_image_url(
+            spec.input_reference_end_url, client, spec.job_id
+        )
+
+    return start, end
+
+
+async def _resolve_image_url(
+    url: str, client: CivisionClient, job_id: str
+) -> str:
+    """Turn one reference image into a URL ModelScope can fetch."""
     if url.startswith("data:"):
         import base64
 
@@ -107,7 +122,7 @@ async def _prepare_image_input(
             raw = base64.b64decode(payload)
         except Exception as exc:  # noqa: BLE001
             raise InvalidRequest(f"input_reference is not valid base64: {exc}") from exc
-        return await upload_image(client, raw, f"ref_{spec.job_id}.png")
+        return await upload_image(client, raw, f"ref_{job_id}.png")
 
     if url.startswith(("http://", "https://")):
         return url
@@ -288,8 +303,9 @@ async def _run_with_account(
         client = CivisionClient(jar=jar, proxy=proxy_url(proxy))
 
         image_input = None
+        image_input_end = None
         if spec.input_reference_url:
-            image_input = await _prepare_image_input(spec, client)
+            image_input, image_input_end = await _prepare_image_input(spec, client)
 
         await _sleep_until_next_submit(last_used)
 
@@ -305,6 +321,7 @@ async def _run_with_account(
                 num_inference_steps=spec.num_inference_steps,
                 accelerate_lora=model.accelerate_lora or None,
                 image_input=image_input,
+                image_input_end=image_input_end,
             )
         except Exception:  # noqa: BLE001
             estimate = 0.0
@@ -334,6 +351,7 @@ async def _run_with_account(
             num_inference_steps=spec.num_inference_steps,
             predict_type=predict_type,
             image_input=image_input,
+            image_input_end=image_input_end,
             accelerate_lora=model.accelerate_lora or None,
         )
 

@@ -340,6 +340,7 @@ class CivisionClient:
         num_inference_steps: int = 50,
         accelerate_lora: bool | None = None,
         image_input: str | None = None,
+        image_input_end: str | None = None,
     ) -> float:
         """Ask upstream how many magicubes a request would cost.
 
@@ -363,14 +364,22 @@ class CivisionClient:
         }
         if accelerate_lora is not None:
             inner["video_inference_args"] = {
-                "mode": "REF2VA",
+                # The civision page sends nothing but the acceleration switch
+                # here. `mode` and `references` are accepted by upstream, but
+                # the page never sets them, so the estimate mirrors the page.
                 "accelerate_lora": accelerate_lora,
-                "references": [],
             }
         if image_input:
             # Image-to-video needs the first frame, otherwise upstream rejects
             # the request with "IMG_2_VIDEO 必须提供首帧图片".
-            inner["image_input_front_args"] = {"image": image_input}
+            inner["image_input_front_args"] = {"image": image_input, "stength": 1}
+        if image_input_end:
+            # First-to-last-frame mode: the end frame rides along in a second
+            # block, exactly as the civision page sends it.
+            inner["extra_image_input_front_args"] = {
+                "image": image_input_end,
+                "stength": 1,
+            }
 
         body = {"type": "VIDEO", "mode": "custom", "video_predict_task_request": inner}
         data = await self._request(
@@ -396,6 +405,7 @@ class CivisionClient:
         seed: int = -1,
         predict_type: str = "TXT_2_VIDEO",
         image_input: dict | None = None,
+        image_input_end: dict | None = None,
         accelerate_lora: bool | None = None,
     ) -> str:
         """Submit a video task and return the upstream task id."""
@@ -414,16 +424,19 @@ class CivisionClient:
         }
         if image_input:
             # A single object with an "image" key, not a list. Upstream rejects
-            # the array form outright.
-            body["imageInputFrontArgs"] = {"image": image_input}
+            # the array form outright. `stength` is upstream's own spelling
+            # of "strength"; the civision page sends it, so we do too.
+            body["imageInputFrontArgs"] = {"image": image_input, "stength": 1}
+        if image_input_end:
+            # First-to-last-frame mode. The civision page puts the end frame in
+            # a second "imageInputFrontArgs"-shaped block; upstream has no
+            # "FLF_2_VIDEO" predict type, so the second frame is what makes
+            # the task a first/last-frame one.
+            body["extraImageInputFrontArgs"] = {"image": image_input_end, "stength": 1}
         if accelerate_lora is not None:
             # Only MiniMax-H3 accepts this block; other models reject it with
             # "videoInferenceArgs 仅支持 MiniMax-H3".
-            body["videoInferenceArgs"] = {
-                "mode": "REF2VA",
-                "accelerateLora": accelerate_lora,
-                "references": [],
-            }
+            body["videoInferenceArgs"] = {"accelerateLora": accelerate_lora}
 
         data = await self._request(
             "POST", "/api/v1/muse/predict/task/video/submit", json_body=body

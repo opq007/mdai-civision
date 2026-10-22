@@ -14,6 +14,9 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "accounts": {
         "frozen_balance": "FLOAT DEFAULT 0.0",
     },
+    "video_jobs": {
+        "input_reference_end_url": "TEXT",
+    },
 }
 
 

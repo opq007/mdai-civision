@@ -42,12 +42,70 @@ Verify **without** generating a video:
    do.
 2. **Request shape** — the upstream payload is built in
    `app/civision/client.py`. Test the builder, not the network call.
+   `tests/test_client_bodies.py` does this with a mock transport.
 3. **Quoting** — `POST /openapi/v1/aigc/agentic/estimate-quota` is free and
    returns the exact cost. Use it to confirm what a job *would* cost.
 4. **Read-only endpoints** — `users/info`, `magicubes/balance`,
    `magicubes/spend/rates` and `defaultTemplateV2` cost nothing.
 
-The core call path is identical for every model — pick account, submit,
+#### The estimate endpoint is a *validator*, not just a price list
+
+`estimate-quota` and the page's own
+`/api/v1/muse/predict/getEstimateConsumeComputeQuota` parse the request body
+with the same Jackson deserialisers the submit endpoint uses. So a **400 from
+the estimator means upstream would reject that body** — the estimator is the
+safe place to find out whether a request shape is legal.
+
+That makes it the right tool for discovering the upstream schema. Send a field
+with the wrong *type* and Jackson names the class it expected:
+
+```
+mode: 123          -> Cannot deserialize value of type
+                      `VideoInferenceArgs$Mode` from number 123
+                      (index value outside legal index range [0..1])
+mode: "BOGUS"      -> ... not one of the values accepted for Enum class:
+                      [REF2VA, FL2VA]
+imageId: "abc"     -> Cannot deserialize value of type `java.lang.Long`
+extraImageInputFrontArgs: "oops"
+                   -> Cannot construct instance of
+                      `ImageInputFrontArgs`
+```
+
+This is how the upstream `VideoInferenceArgs` and `ImageInputFrontArgs`
+shapes were mapped without a single generation.
+
+#### ⚠️ Do not probe the **submit** endpoint
+
+The submit endpoint is the one endpoint that spends magicubes. It also
+**accepts** a request before it decides to charge, so a "probe" that merely
+tries to provoke a validation error can succeed and start a real generation.
+
+**Use the estimator for every shape question.** If you do hit submit, the
+task reserves its magicubes immediately and releases them only when the task
+settles — a cancelled task can hold the reservation for a long time.
+
+#### ⚠️ The test suite must not share the real database
+
+`app.db` builds its engine at import time from `DATABASE_URL`. The default
+points at `data/civision.db`, which is the **same file the running dev server
+uses**. A test that creates a `video_jobs` row therefore leaves a job the
+server's workers will pick up on the next restart — and a real MiniMax-H3
+generation, at 34+ magicubes.
+
+`tests/conftest.py` therefore points `DATABASE_URL` at a throwaway file
+*before* anything imports `app.db`, and creates the schema there. Keep it
+that way.
+
+Two more traps in the same area:
+
+- the routers bind `enqueue_job` / `require_api_key` at import time, so
+  `monkeypatch.setattr("app.services.queue.enqueue_job", ...)` does **not**
+  take effect. Patch the router's binding
+  (`app.routers.videos.enqueue_job`) or use `app.dependency_overrides`.
+- the test client does not run the app's lifespan, so `init_db` never fires.
+  The session fixture in `tests/conftest.py` creates the schema.
+
+### The core call path is identical for every model
 poll, download. Model-specific differences are confined to:
 
 - the model id (`checkpointModelVersionId`)
@@ -73,6 +131,54 @@ Text-to-image and image-to-video on the same account are cheaper still, and
 exercise the same account/session/proxy/rotation machinery.
 
 ## Other rules
+
+### First-to-last-frame is a second image block, not a predict type
+
+Upstream has **no** `FLF_2_VIDEO` predict type — the enum only accepts
+`IMG_2_VIDEO`, `DIFFUSION`, `TXT_2_IMG`, `INPAINTING`, `TXT_2_AUDIO`,
+`TXT_2_VIDEO` and `IMG_2_IMG`. `FLF_2_VIDEO` appears in the *catalog* as a
+capability flag, which is what decides whether the page shows the switch.
+
+The page implements first-to-last-frame as `IMG_2_VIDEO` plus a second image
+block:
+
+```json
+"imageInputFrontArgs":     { "image": "<start url>", "stength": 1 },
+"extraImageInputFrontArgs": { "image": "<end url>",   "stength": 1 }
+```
+
+`stength` is upstream's own spelling. Upstream ignores the field (any type is
+accepted), but the page sends it, so the service sends it too.
+
+### Never set `mode` in `videoInferenceArgs`
+
+Upstream's `VideoInferenceArgs` is:
+
+```
+accelerateLora : Boolean
+mode           : Mode            // [REF2VA, FL2VA]
+references     : List<Reference>
+```
+
+Setting `mode` explicitly **breaks MiniMax-H3**:
+
+```
+videoInferenceArgs: {accelerateLora: true}                       -> accepted
+videoInferenceArgs: {mode: "REF2VA", accelerateLora: true}       -> rejected
+                         "MiniMax-H3 推理加速当前仅支持 FL2VA 模式"
+```
+
+The civision page never sets `mode` — it sends `{accelerateLora: P}` and
+nothing else. Match the page: no `mode`, no `references`.
+
+### The admin UI is HTML, the API is JSON
+
+`/admin/*` renders pages; `/v1/*` serves OpenAI clients. A browser that
+opens `/admin` without a session must be **redirected to `/admin/login`**,
+not handed a JSON error envelope. The guard raises `AdminLoginRequired`
+(the `app/main.py` handler turns it into a 303) — note that a dependency
+that *returns* a `Response` does **not** short-circuit the route in FastAPI,
+so raising is the only way to do it from a dependency.
 
 ### The session is a cookie session
 

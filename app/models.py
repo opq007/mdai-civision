@@ -151,6 +151,11 @@ class VideoJob(Base):
     upstream_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     local_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     input_reference_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The end frame of a first-to-last-frame job. Upstream has no separate
+    # predict type for it: the second image is what makes the job an FLF one.
+    input_reference_end_url: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
 
     account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("accounts.id"), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)

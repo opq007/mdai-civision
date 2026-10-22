@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select
@@ -17,7 +17,7 @@ from app.db import init_db, session_scope
 from app.models import Account
 from app.ratelimit import enforce_rate_limit
 from app.routers import admin, auth, videos
-from app.security import require_api_key
+from app.security import AdminLoginRequired, require_api_key
 from app.services.maintenance import maintenance
 from app.services.metrics import requests_total
 from app.services.queue import job_queue
@@ -125,6 +125,16 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content=payload)
 
 
+@app.exception_handler(AdminLoginRequired)
+async def admin_login_required(request: Request, exc: AdminLoginRequired):
+    """Send an unauthenticated browser to the admin sign-in page.
+
+    The admin UI is a set of HTML pages, so a JSON error body is useless
+    there: the operator needs a form to type a username and password into.
+    """
+    return RedirectResponse("/admin/login", status_code=303)
+
+
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception):
     """Render unexpected errors in the OpenAI error shape."""
@@ -165,7 +175,10 @@ async def metrics() -> Response:
 async def index() -> HTMLResponse:
     return HTMLResponse(
         "<h1>mdai-civision</h1>"
-        "<p>OpenAI-compatible video generation backed by ModelScope Civision.</p>"
-        '<ul><li><a href="/docs">API docs</a></li>'
-        '<li><a href="/admin">Admin</a></li></ul>'
+        "<p>OpenAI-compatible video generation on ModelScope Civision.</p>"
+        '<ul>'
+        '<li><a href="/admin/login">Admin sign-in</a></li>'
+        '<li><a href="/admin">Admin dashboard</a></li>'
+        '<li><a href="/docs">API docs</a></li>'
+        "</ul>"
     )
