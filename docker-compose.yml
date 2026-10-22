@@ -1,0 +1,19 @@
+services:
+  civision:
+    build: .
+    container_name: mdai-civision
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      # The browser profile keeps the GitHub sign-in, which is what makes
+      # unattended session renewal possible.
+      - ./.browser-profile:/app/.browser-profile
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

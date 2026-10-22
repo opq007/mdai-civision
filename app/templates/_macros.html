@@ -1,0 +1,16 @@
+{% macro nav(active) -%}
+<nav class="nav">
+  <a href="/admin" class="{{ 'on' if active == 'dash' }}">Dashboard</a>
+  <a href="/admin/accounts" class="{{ 'on' if active == 'accounts' }}">Accounts</a>
+  <a href="/admin/proxies" class="{{ 'on' if active == 'proxies' }}">Proxies</a>
+  <a href="/admin/keys" class="{{ 'on' if active == 'keys' }}">API keys</a>
+  <a href="/admin/models" class="{{ 'on' if active == 'models' }}">Models</a>
+  <a href="/admin/usage" class="{{ 'on' if active == 'usage' }}">Usage</a>
+  <span class="spacer"></span>
+  <form method="post" action="/admin/logout"><button class="link">Sign out</button></form>
+</nav>
+{%- endmacro %}
+
+{% macro status_pill(status) -%}
+<span class="pill {{ status }}">{{ status }}</span>
+{%- endmacro %}

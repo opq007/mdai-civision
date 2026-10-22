@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local secrets and scratch files
+.env
+key.txt
+cj.txt
+captured_cookies.txt
+*.log
+resp.html
+out*.mp4
+vid*.txt
+
+# Runtime data
+data/
+.browser-profile/
+.chrome-cdp/

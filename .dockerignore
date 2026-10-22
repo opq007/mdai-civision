@@ -1,0 +1,8 @@
+.git
+data
+.browser-profile
+.chrome-cdp
+__pycache__
+*.pyc
+*.log
+.env

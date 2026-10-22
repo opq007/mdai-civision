@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard · mdai-civision</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% from "_macros.html" import nav %}
+  {{ nav('dash') }}
+  <div class="wrap">
+    <h1>Dashboard</h1>
+    <p class="sub">OpenAI-compatible video generation on ModelScope Civision</p>
+
+    <div class="stats">
+      <div class="stat"><div class="k">Magicubes</div><div class="v">{{ total_balance|round(0) }}</div></div>
+      <div class="stat"><div class="k">Active accounts</div><div class="v">{{ active_accounts }}</div></div>
+      <div class="stat"><div class="k">Expired</div><div class="v">{{ expired_accounts }}</div></div>
+      <div class="stat"><div class="k">Queued</div><div class="v">{{ queued }}</div></div>
+      <div class="stat"><div class="k">Jobs (24h)</div><div class="v">{{ jobs_24h }}</div></div>
+      <div class="stat"><div class="k">Magicubes (24h)</div><div class="v">{{ moli_24h|round(0) }}</div></div>
+    </div>
+
+    <h2>Accounts</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Name</th><th>Status</th><th>Balance</th><th>Proxy</th><th>Concurrency</th><th>Last used</th></tr></thead>
+        <tbody>
+        {% for a in accounts %}
+          <tr>
+            <td>{{ a.name }}</td>
+            <td><span class="pill {{ a.status }}">{{ a.status }}</span></td>
+            <td>{{ a.available_balance|round(0) }}</td>
+            <td>{{ a.proxy.name if a.proxy else '—' }}</td>
+            <td>{{ a.running_jobs }}/{{ a.max_concurrency }}</td>
+            <td class="muted">{{ a.last_used_at.strftime('%Y-%m-%d %H:%M') if a.last_used_at else '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">No accounts yet — add one under <a href="/admin/accounts">Accounts</a>.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Proxies</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Name</th><th>URL</th><th>Health</th><th>Bound accounts</th></tr></thead>
+        <tbody>
+        {% for p in proxies %}
+          <tr>
+            <td>{{ p.name }}</td>
+            <td class="mono">{{ p.url }}</td>
+            <td><span class="pill {{ 'active' if p.healthy else 'failed' }}">{{ 'healthy' if p.healthy else 'unhealthy' }}</span></td>
+            <td>{{ accounts|selectattr('proxy_id', 'equalto', p.id)|list|length }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">No proxies configured.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>API keys</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Name</th><th>Prefix</th><th>Enabled</th><th>Last used</th></tr></thead>
+        <tbody>
+        {% for k in api_keys %}
+          <tr>
+            <td>{{ k.name }}</td>
+            <td class="mono">{{ k.key_prefix }}…</td>
+            <td>{{ 'yes' if k.enabled else 'no' }}</td>
+            <td class="muted">{{ k.last_used_at.strftime('%Y-%m-%d %H:%M') if k.last_used_at else '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">No API keys yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

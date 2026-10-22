@@ -1,0 +1,20 @@
+<tr>
+  <td>{{ a.name }}</td>
+  <td><span class="pill {{ a.status }}">{{ a.status }}</span></td>
+  <td>{{ a.available_balance|round(0) }}</td>
+  <td>{{ a.proxy.name if a.proxy else '—' }}</td>
+  <td>{{ a.running_jobs }}/{{ a.max_concurrency }}</td>
+  <td class="muted">{{ a.auth_source }}</td>
+  <td class="muted" style="max-width:260px">{{ a.last_error or '—' }}</td>
+  <td style="white-space:nowrap">
+    <form method="post" action="/admin/accounts/{{ a.id }}/validate" style="display:inline">
+      <button class="btn ghost sm" type="submit">Validate</button>
+    </form>
+    <form method="post" action="/admin/accounts/{{ a.id }}/toggle" style="display:inline">
+      <button class="btn ghost sm" type="submit">{{ 'Disable' if a.status == 'active' else 'Enable' }}</button>
+    </form>
+    <form method="post" action="/admin/accounts/{{ a.id }}/delete" style="display:inline">
+      <button class="btn danger sm" type="submit">Delete</button>
+    </form>
+  </td>
+</tr>

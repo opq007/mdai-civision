@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Usage · mdai-civision</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% from "_macros.html" import nav %}
+  {{ nav('usage') }}
+  <div class="wrap">
+    <h1>Usage</h1>
+    <p class="sub">Recent jobs and the magicubes they consumed.</p>
+
+    <h2>Jobs</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>ID</th><th>Model</th><th>Size</th><th>Secs</th><th>Status</th>
+                   <th>Progress</th><th>Magicubes</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+        {% for j in jobs %}
+          <tr>
+            <td class="mono">{{ j.id[:18] }}…</td>
+            <td>{{ j.model }}</td>
+            <td class="muted">{{ j.width }}×{{ j.height }}</td>
+            <td>{{ j.seconds }}</td>
+            <td><span class="pill {{ j.status }}">{{ j.status }}</span></td>
+            <td>{{ j.progress }}%</td>
+            <td>{{ j.actual_moli or j.estimated_moli or '—' }}</td>
+            <td class="muted">{{ j.created_at.strftime('%m-%d %H:%M') }}</td>
+            <td>
+              {% if j.status == 'completed' %}
+                <a href="/v1/videos/{{ j.id }}/content" class="btn ghost sm">Download</a>
+              {% elif j.error_message %}
+                <span class="muted" title="{{ j.error_message }}">error</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="muted">No jobs yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Usage log</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Job</th><th>Model</th><th>Status</th><th>Estimated</th>
+                   <th>Actual</th><th>Duration</th><th>Error</th></tr></thead>
+        <tbody>
+        {% for l in logs %}
+          <tr>
+            <td class="mono">{{ l.job_id[:18] }}…</td>
+            <td>{{ l.model }}</td>
+            <td><span class="pill {{ l.status }}">{{ l.status }}</span></td>
+            <td>{{ l.moli_estimated }}</td>
+            <td>{{ l.moli_actual }}</td>
+            <td class="muted">{{ l.duration_ms }} ms</td>
+            <td class="muted" style="max-width:280px">{{ l.error or '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" class="muted">Nothing recorded yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

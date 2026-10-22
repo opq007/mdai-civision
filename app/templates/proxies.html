@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxies · mdai-civision</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% from "_macros.html" import nav %}
+  {{ nav('proxies') }}
+  <div class="wrap">
+    <h1>Proxies</h1>
+    <p class="sub">Accounts are pinned to a proxy so their egress IP stays constant.</p>
+
+    {% if message %}<div class="msg {{ message.kind }}">{{ message.text }}</div>{% endif %}
+
+    <h2>Add a proxy</h2>
+    <div class="card">
+      <form method="post" action="/admin/proxies">
+        <div class="row">
+          <div>
+            <label for="name">Name</label>
+            <input id="name" name="name" placeholder="e.g. sg-01" required>
+          </div>
+          <div style="flex:2">
+            <label for="url">URL</label>
+            <input id="url" name="url" placeholder="socks5://host:1080" required>
+          </div>
+          <div>
+            <label for="username">Username</label>
+            <input id="username" name="username" autocomplete="off">
+          </div>
+          <div>
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="off">
+          </div>
+          <div style="flex:0 0 auto">
+            <button type="submit">Add</button>
+          </div>
+        </div>
+        <div class="hint">Supported schemes: http, https, socks5, socks5h.</div>
+      </form>
+    </div>
+
+    <h2>Pool</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Name</th><th>URL</th><th>Auth</th><th>Health</th><th>Failures</th><th></th></tr></thead>
+        <tbody id="proxies">
+        {% for p in proxies %}
+          {% include "_proxy_row.html" %}
+        {% else %}
+          <tr><td colspan="6" class="muted">No proxies yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

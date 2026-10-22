@@ -1,0 +1,12 @@
+<tr>
+  <td>{{ p.name }}</td>
+  <td class="mono">{{ p.url }}</td>
+  <td class="muted">{{ p.username or '—' }}</td>
+  <td><span class="pill {{ 'active' if p.healthy else 'failed' }}">{{ 'healthy' if p.healthy else 'unhealthy' }}</span></td>
+  <td>{{ p.fail_count }}</td>
+  <td>
+    <form method="post" action="/admin/proxies/{{ p.id }}/delete" style="display:inline">
+      <button class="btn danger sm" type="submit">Delete</button>
+    </form>
+  </td>
+</tr>

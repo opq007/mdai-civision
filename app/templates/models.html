@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Models · mdai-civision</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% from "_macros.html" import nav %}
+  {{ nav('models') }}
+  <div class="wrap">
+    <h1>Models</h1>
+    <p class="sub">Pulled live from civision. The <code>sora-2</code> style names are aliases onto real models.</p>
+
+    {% if message %}<div class="msg {{ message.kind }}">{{ message.text }}</div>{% endif %}
+
+    <h2>Available video models</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Public name</th><th>Model</th><th>Type</th><th>Text to video</th>
+                   <th>Image to video</th><th>First-last frame</th></tr></thead>
+        <tbody>
+        {% for m in catalog.models %}
+          <tr>
+            <td class="mono">{{ m.requested }}</td>
+            <td class="muted">{{ m.label }}</td>
+            <td class="mono muted">{{ m.civision_value }}</td>
+            <td>{{ 'yes' if m.supports_txt2video else '—' }}</td>
+            <td>{{ 'yes' if m.supports_img2video else '—' }}</td>
+            <td>{{ 'yes' if m.supports_flf2video else '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">Could not reach the model catalog.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Aliases</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Alias</th><th>Points at</th></tr></thead>
+        <tbody>
+        {% for a in aliases %}
+          <tr><td class="mono">{{ a.alias }}</td><td class="mono muted">{{ a.civision_value }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">
+            Using the built-in defaults: <code>sora-2</code> and <code>sora-2-pro</code>.
+          </td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Supported sizes</h2>
+    <div class="card">
+      <p style="margin-top:0">
+        The four OpenAI sizes are accepted, plus civision's own width/height pairs.
+      </p>
+      <table>
+        <thead><tr><th>Requested</th><th>Sent upstream</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">720x1280</td><td class="mono muted">720 × 1280</td></tr>
+          <tr><td class="mono">1280x720</td><td class="mono muted">1280 × 720</td></tr>
+          <tr><td class="mono">1024x1792</td><td class="mono muted">480 × 848 (closest tier)</td></tr>
+          <tr><td class="mono">1792x1024</td><td class="mono muted">848 × 480 (closest tier)</td></tr>
+          <tr><td class="mono muted">480x480, 720x720, 640x480, …</td><td class="mono muted">native civision sizes</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

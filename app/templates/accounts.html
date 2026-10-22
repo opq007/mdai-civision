@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Accounts · mdai-civision</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% from "_macros.html" import nav %}
+  {{ nav('accounts') }}
+  <div class="wrap">
+    <h1>Accounts</h1>
+    <p class="sub">Each account carries its own magicube balance and its own proxy egress.</p>
+
+    {% if message %}
+      <div class="msg {{ message.kind }}">
+        {{ message.text }}
+        {% if message.link %}<br><a href="{{ message.link }}" target="_blank" class="mono">{{ message.link }}</a>{% endif %}
+      </div>
+    {% endif %}
+
+    <h2>Add an account</h2>
+    <div class="card">
+      <form method="post" action="/admin/accounts/from-cookies">
+        <label for="name">Account name</label>
+        <input id="name" name="name" placeholder="e.g. account-1" required>
+
+        <label for="cookies">Full cookie string</label>
+        <textarea id="cookies" name="cookies" required
+          placeholder="m_session_id=...; h_uid=...; csrf_session=...; csrf_token=...; acw_tc=..."></textarea>
+        <div class="hint">
+          In your browser: sign in at modelscope.ai, then DevTools &rarr; Application &rarr;
+          Cookies &rarr; <code>https://www.modelscope.ai</code> &rarr; select all rows and copy
+          them as one <code>name=value; name=value</code> string.
+          <b>m_session_id</b> and <b>h_uid</b> are required — they carry the signed-in state.
+        </div>
+
+        <div class="row">
+          <div>
+            <label for="proxy_id">Proxy (optional)</label>
+            <select id="proxy_id" name="proxy_id">
+              <option value="">— assign automatically —</option>
+              {% for p in proxies %}
+                <option value="{{ p.id }}">{{ p.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="max_concurrency">Max concurrent jobs</label>
+            <input id="max_concurrency" name="max_concurrency" type="number" value="1" min="1" max="8">
+          </div>
+          <div style="flex:0 0 auto">
+            <button type="submit">Validate and add</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <h2>Accounts</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Status</th><th>Balance</th><th>Proxy</th><th>Jobs</th>
+              <th>Source</th><th>Last error</th><th></th></tr>
+        </thead>
+        <tbody id="accounts">
+        {% for a in accounts %}
+          {% include "_account_row.html" %}
+        {% else %}
+          <tr><td colspan="8" class="muted">No accounts yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Sign in with GitHub instead</h2>
+    <div class="card">
+      <p class="muted" style="margin-top:0">
+        This produces the same cookie string that the form above accepts.
+        Run it on the server (or locally with <code>tools/browser_capture.py</code>).
+      </p>
+      <form method="post" action="/admin/accounts/oauth-url">
+        <input type="hidden" name="name" value="oauth-account">
+        <button type="submit" class="btn ghost">Get a GitHub sign-in link</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
