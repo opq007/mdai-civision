@@ -67,6 +67,9 @@ OPENAI_SECONDS_MAP: dict[int, int] = {4: 3, 8: 5, 12: 10}
 CIVISION_SECONDS = (3, 5, 10)
 DEFAULT_SECONDS = 5
 
+# The step count the civision page pins when LoRA acceleration is enabled.
+ACCELERATED_STEPS = 4
+
 # Fallbacks when the alias table has not been seeded yet.
 DEFAULT_ALIASES: dict[str, str] = {
     "sora-2": "WAN_VIDEO_2_2_T2V_A_14_B",
@@ -96,6 +99,10 @@ class ResolvedModel:
     seconds: tuple[int, ...] = CIVISION_SECONDS
     default_guidance_scale: float = 7.5
     default_steps: int = 50
+    # MiniMax-H3 exposes a "LoRA acceleration" switch that the civision page
+    # turns on by default. It forces numInferenceSteps down to 4 and halves
+    # the magicube cost, so the service must send it to match the page.
+    accelerate_lora: bool = False
 
     @property
     def supports_image_input(self) -> bool:
@@ -203,7 +210,15 @@ def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[Resolved
         value = target.get("value", "")
         # MiniMax-H3 is the only model that offers the 10 second duration.
         seconds = CIVISION_SECONDS
-        if value.upper() != "MINIMAX_H3":
+        accelerate = False
+        steps = int(dp.get("numInferenceSteps") or 50)
+        if value.upper() == "MINIMAX_H3":
+            seconds = CIVISION_SECONDS
+            # The civision page turns LoRA acceleration on by default for this
+            # model, which pins numInferenceSteps to 4 and halves the cost.
+            accelerate = True
+            steps = ACCELERATED_STEPS
+        else:
             seconds = tuple(s for s in CIVISION_SECONDS if s != 10)
         return ResolvedModel(
             requested=requested,
@@ -220,7 +235,8 @@ def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[Resolved
             default_height=int(dp.get("height") or (sizes[-1][1] if sizes else 1280)),
             seconds=seconds,
             default_guidance_scale=float(dp.get("guidanceScale") or 7.5),
-            default_steps=int(dp.get("numInferenceSteps") or 50),
+            default_steps=steps,
+            accelerate_lora=accelerate,
         )
 
     resolved: list[ResolvedModel] = []

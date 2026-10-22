@@ -334,28 +334,38 @@ class CivisionClient:
         seconds: int,
         predict_type: str = "TXT_2_VIDEO",
         prompt: str = "",
+        guidance_scale: float = 7.5,
+        num_inference_steps: int = 50,
+        accelerate_lora: bool | None = None,
     ) -> float:
         """Ask upstream how many magicubes a request would cost.
 
         This endpoint uses snake_case field names, unlike the submit endpoint.
+        The arguments must mirror the submit body exactly, otherwise the
+        estimate is computed for a different job: MiniMax-H3 with LoRA
+        acceleration costs half of what its published step count suggests.
         """
-        body = {
-            "type": "VIDEO",
-            "mode": "custom",
-            "video_predict_task_request": {
-                "predict_type": predict_type,
-                "prompt_args": {"prompt": prompt},
-                "basic_diffusion_args": {
-                    "width": width,
-                    "height": height,
-                    "total_seconds": seconds,
-                    "guidance_scale": 7.5,
-                    "num_inference_steps": 50,
-                    "seed": -1,
-                },
-                "model_args": {"checkpoint_model_version_id": version_id},
+        inner: dict[str, Any] = {
+            "predict_type": predict_type,
+            "prompt_args": {"prompt": prompt},
+            "basic_diffusion_args": {
+                "width": width,
+                "height": height,
+                "total_seconds": seconds,
+                "guidance_scale": guidance_scale,
+                "num_inference_steps": num_inference_steps,
+                "seed": -1,
             },
+            "model_args": {"checkpoint_model_version_id": version_id},
         }
+        if accelerate_lora is not None:
+            inner["video_inference_args"] = {
+                "mode": "REF2VA",
+                "accelerate_lora": accelerate_lora,
+                "references": [],
+            }
+
+        body = {"type": "VIDEO", "mode": "custom", "video_predict_task_request": inner}
         data = await self._request(
             "POST", "/openapi/v1/aigc/agentic/estimate-quota", json_body=body
         )
@@ -379,6 +389,7 @@ class CivisionClient:
         seed: int = -1,
         predict_type: str = "TXT_2_VIDEO",
         image_input: dict | None = None,
+        accelerate_lora: bool | None = None,
     ) -> str:
         """Submit a video task and return the upstream task id."""
         body: dict[str, Any] = {
@@ -396,6 +407,14 @@ class CivisionClient:
         }
         if image_input:
             body["imageInputFrontArgs"] = [image_input]
+        if accelerate_lora is not None:
+            # Only MiniMax-H3 accepts this block; other models reject it with
+            # "videoInferenceArgs 仅支持 MiniMax-H3".
+            body["videoInferenceArgs"] = {
+                "mode": "REF2VA",
+                "accelerateLora": accelerate_lora,
+                "references": [],
+            }
 
         data = await self._request(
             "POST", "/api/v1/muse/predict/task/video/submit", json_body=body

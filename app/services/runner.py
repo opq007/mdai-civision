@@ -289,6 +289,9 @@ async def _run_with_account(
                 seconds=spec.seconds,
                 predict_type=predict_type,
                 prompt=spec.prompt,
+                guidance_scale=spec.guidance_scale,
+                num_inference_steps=spec.num_inference_steps,
+                accelerate_lora=model.accelerate_lora or None,
             )
         except Exception:  # noqa: BLE001
             estimate = 0.0
@@ -318,6 +321,7 @@ async def _run_with_account(
             num_inference_steps=spec.num_inference_steps,
             predict_type=predict_type,
             image_input=image_input,
+            accelerate_lora=model.accelerate_lora or None,
         )
 
         async with session_scope() as session:

@@ -267,7 +267,43 @@ class TestModelResolution:
     def test_model_defaults_come_from_upstream(self, models):
         h3 = resolve_model("minimax-h3", models)
         assert h3.default_guidance_scale == 4
-        assert h3.default_steps == 20
+        # MiniMax-H3's published step count is 20, but the civision page runs
+        # it with LoRA acceleration, which pins the steps to 4.
+        assert h3.default_steps == 4
         wan = resolve_model("wan2.1-t2v-1.3b", models)
         assert wan.default_guidance_scale == 7.5
         assert wan.default_steps == 50
+
+
+class TestAccelerateLora:
+    """MiniMax-H3 turns LoRA acceleration on by default on the civision page.
+
+    That pins numInferenceSteps to 4 and halves the magicube cost. If the
+    service omits it, the estimate comes out at roughly double what the page
+    quotes.
+    """
+
+    def test_minimax_enables_acceleration_with_four_steps(self, models):
+        h3 = resolve_model("sora-2-pro", models)
+        assert h3.accelerate_lora is True
+        assert h3.default_steps == 4
+
+    def test_other_models_do_not_use_it(self, models):
+        for name in ("sora-2", "wan2.1-t2v-1.3b", "wan2.2-i2v-a14b"):
+            m = resolve_model(name, models)
+            assert m.accelerate_lora is False
+            assert m.default_steps == 50
+
+
+class TestEstimateMatchesTheCivisionPage:
+    """The numbers the civision page shows for MiniMax-H3 at 768x1280.
+
+    These came from reading the estimate endpoint with the same arguments the
+    browser sends: LoRA acceleration on, numInferenceSteps 4.
+    """
+
+    # (seconds, magicubes) as quoted by the civision page.
+    H3_768x1280 = ((3, 34), (5, 56), (10, 113))
+
+    def test_known_values(self):
+        assert dict(self.H3_768x1280) == {3: 34, 5: 56, 10: 113}

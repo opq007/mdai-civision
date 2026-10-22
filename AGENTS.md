@@ -25,7 +25,7 @@ Magicube cost is driven by resolution and duration, and it escalates fast:
 | Wan2.1-T2V-1.3B | 480×480 | 3s | ~2 |
 | Wan2.1-T2V-1.3B | 720×1280 | 5s | ~23 |
 | Wan2.2-T2V-A14B | 720×1280 | 5s | ~23 |
-| MiniMax-H3 | 768×1280 | 10s | **~563** |
+| MiniMax-H3 | 768×1280 | 10s | **~113** |
 
 A single careless call can burn more magicubes than a test account holds.
 The MiniMax-H3 figure alone is more than double the balance of a fresh
@@ -99,6 +99,40 @@ Many endpoints answer 200 with a failure inside the body. Check `Code`,
 Do not hard-code model lists, size sliders or durations. They are pulled from
 `/api/v1/muse/predict/unauth/defaultTemplateV2` and cached for five minutes.
 `tests/test_mapping.py` carries a trimmed copy for unit tests only.
+
+### Model quirks live on the model, not in the caller
+
+MiniMax-H3 is the odd one out:
+
+- it is the only model with a **10 second** duration
+- it is the only model with **one size tier** (768-based, no 480 tier)
+- it is the only model that accepts `videoInferenceArgs`; other models reject
+  the block with `videoInferenceArgs 仅支持 MiniMax-H3`
+- it has a **LoRA acceleration** switch that the civision page turns on by
+  default, which pins `numInferenceSteps` to 4 and **halves the cost**
+
+That last one is a trap. MiniMax-H3's *published* default is 20 steps, but
+the page runs it with acceleration on. If the service omits
+`accelerateLora`, the estimate comes out at roughly double what the page
+quotes (68 instead of 34 for 3 seconds).
+
+The rule that follows: **per-model behaviour belongs on the model object**,
+resolved in `build_catalog`, not sprinkled through the request path. The
+mapping layer already carries `accelerate_lora`, `default_steps` and
+`default_guidance_scale` for exactly this reason.
+
+### The estimate must mirror the submit
+
+`estimate-quota` and the submit endpoint take the same request structure
+(`video_predict_task_request`), differing only in field naming. So:
+
+- every parameter of the estimate must match the submit
+- the free estimate endpoint can confirm that upstream **accepts** a request
+  body, without generating anything
+
+Hard-coding anything in the estimate body (it previously pinned
+`guidance_scale` to 7.5 and `num_inference_steps` to 50) makes the estimate
+describe a different job than the one being submitted.
 
 ### Chromium's cookie store is not durable
 
