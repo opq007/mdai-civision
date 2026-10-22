@@ -21,7 +21,7 @@ RUN pip install --upgrade pip && pip install .
 # and for unattended session renewal. If you only ever add accounts by pasting
 # the cookie string, build with --build-arg INSTALL_BROWSER=false to skip this
 # and save roughly 400 MB.
-ARG INSTALL_BROWSER=true
+ARG INSTALL_BROWSER=false
 RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
         playwright install chromium; \
     fi
