@@ -38,11 +38,15 @@ class Catalog:
     def resolve(self, requested: str) -> ResolvedModel | None:
         return _resolve_model(requested, self.models)
 
-    def resolve_size(self, size: str | None) -> tuple[int, int]:
-        return _resolve_size(size)
+    def resolve_size(
+        self, size: str | None, model: ResolvedModel | None = None
+    ) -> tuple[int, int]:
+        return _resolve_size(size, model)
 
-    def resolve_seconds(self, seconds) -> int:
-        return _resolve_seconds(seconds)
+    def resolve_seconds(
+        self, seconds, model: ResolvedModel | None = None
+    ) -> int:
+        return _resolve_seconds(seconds, model)
 
 
 class CatalogService:

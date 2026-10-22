@@ -56,12 +56,11 @@ async def create_video(
         )
 
     try:
-        width, height = catalog.resolve_size(body.size)
-        seconds = catalog.resolve_seconds(body.seconds)
+        width, height = catalog.resolve_size(body.size, model)
+        seconds = catalog.resolve_seconds(body.seconds, model)
     except ValueError as exc:
         raise openai_error(400, str(exc), "invalid_request_error") from exc
 
-    needs_image = model.requested not in ("sora-2", "sora-2-pro")
     if body.input_reference is not None:
         if not model.supports_image_input:
             raise openai_error(
@@ -71,7 +70,7 @@ async def create_video(
                 "invalid_request_error",
                 param="input_reference",
             )
-    elif needs_image and not model.supports_txt2video:
+    elif not model.supports_txt2video:
         raise openai_error(
             400,
             f"model {model.requested!r} requires input_reference",
@@ -87,11 +86,13 @@ async def create_video(
         prompt=body.prompt,
         negative_prompt=body.negative_prompt or "",
         seconds=str(seconds),
-        size=body.size or "720x1280",
+        # Record the size that was actually requested to the caller, and keep
+        # the resolved dimensions in width/height.
+        size=body.size or f"{width}x{height}",
         width=width,
         height=height,
-        guidance_scale=body.guidance_scale or 7.5,
-        num_inference_steps=body.num_inference_steps or 50,
+        guidance_scale=body.guidance_scale or model.default_guidance_scale,
+        num_inference_steps=body.num_inference_steps or model.default_steps,
         status="queued",
         progress=0,
         created_at=now,

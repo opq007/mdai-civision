@@ -18,9 +18,10 @@ COPY pyproject.toml ./
 RUN pip install --upgrade pip && pip install .
 
 # Chromium is only needed for the GitHub OAuth capture (app/services/oauth.py)
-# and for unattended session renewal. If you only ever add accounts by pasting
-# the cookie string, build with --build-arg INSTALL_BROWSER=false to skip this
-# and save roughly 400 MB.
+# and for unattended session renewal. It is off by default because it costs
+# roughly 400 MB; accounts can always be added by pasting the cookie string
+# instead. Turn it on with --build-arg INSTALL_BROWSER=true when you need
+# the OAuth flow or automatic renewal.
 ARG INSTALL_BROWSER=false
 RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
         playwright install chromium; \
