@@ -112,16 +112,64 @@ MEASURED: dict[str, dict[tuple[int, int], dict[int, float]]] = {
     },
 }
 
+# Variants of one upstream model have their own prices, so the table is
+# keyed by the *public* name for those. MiniMax-H3 without LoRA
+# acceleration runs 20 steps instead of 4, which doubles the cost.
+#
+# Measured with the free estimator, 2026-10-22.
+MEASURED_BY_NAME: dict[str, dict[tuple[int, int], dict[int, float]]] = {
+    # With acceleration: 4 steps, the same prices as the base MiniMax-H3 row.
+    "minimax-h3-turbo": {
+        (768, 1280): {3: 34, 5: 56, 10: 113},
+        (768, 960): {3: 34, 5: 56, 10: 113},
+        (768, 768): {3: 34, 5: 56, 10: 113},
+        (960, 768): {3: 34, 5: 56, 10: 113},
+        (1280, 768): {3: 34, 5: 56, 10: 113},
+    },
+    # Without acceleration: 20 steps, twice the price.
+    "minimax-h3": {
+        (768, 1280): {3: 68, 5: 113, 10: 225},
+        (768, 960): {3: 68, 5: 113, 10: 225},
+        (768, 768): {3: 68, 5: 113, 10: 225},
+        (960, 768): {3: 68, 5: 113, 10: 225},
+        (1280, 768): {3: 68, 5: 113, 10: 225},
+    },
+}
+
 MODEL_LABELS = {
     "WAN_VIDEO_2_1_T2V_1_3_B": "Wan2.1-T2V-1.3B (text to video)",
     "WAN_VIDEO_2_1_I2V_14_B": "Wan2.1-I2V-14B-720P (image to video)",
     "MINIMAX_H3": "MiniMax-H3 (text / image / first-last frame)",
 }
 
+# Public name -> the label to show for it. A variant gets its own label so
+# the admin cost table can tell the two MiniMax-H3 variants apart.
+VARIANT_LABELS = {
+    "minimax-h3-turbo": "MiniMax-H3 turbo (LoRA acceleration, 4 steps)",
+    "minimax-h3": "MiniMax-H3 (no acceleration, 20 steps)",
+}
+
+
+def _table_for(model: ResolvedModel) -> dict[tuple[int, int], dict[int, float]]:
+    """The measured costs for one model.
+
+    A variant has its own table, keyed by its public name, because two
+    variants of one upstream model can cost different amounts.
+    """
+    if model.is_variant:
+        return MEASURED_BY_NAME.get(model.requested, {})
+    return MEASURED.get(model.civision_value, {})
+
+
+def _label_for(model: ResolvedModel) -> str:
+    if model.is_variant:
+        return VARIANT_LABELS.get(model.requested, model.label)
+    return model.label
+
 
 def rows_for(model: ResolvedModel) -> list[CostRow]:
     """The measured cost rows for one model, one row per duration."""
-    table = MEASURED.get(model.civision_value)
+    table = _table_for(model)
     if not table:
         return []
     rows: list[CostRow] = []
@@ -129,8 +177,8 @@ def rows_for(model: ResolvedModel) -> list[CostRow]:
         for seconds, magicubes in by_seconds.items():
             rows.append(
                 CostRow(
-                    model=model.civision_value,
-                    label=model.label,
+                    model=model.requested,
+                    label=_label_for(model),
                     width=width,
                     height=height,
                     seconds=seconds,
@@ -142,15 +190,15 @@ def rows_for(model: ResolvedModel) -> list[CostRow]:
 
 def lines_for(model: ResolvedModel) -> list[CostLine]:
     """One row per size, with the cost at each duration."""
-    table = MEASURED.get(model.civision_value)
+    table = _table_for(model)
     if not table:
         return []
     lines: list[CostLine] = []
     for index, ((width, height), by_seconds) in enumerate(table.items()):
         lines.append(
             CostLine(
-                model=model.civision_value,
-                label=model.label,
+                model=model.requested,
+                label=_label_for(model),
                 width=width,
                 height=height,
                 cost3=by_seconds.get(3),
@@ -166,7 +214,7 @@ def lookup(
     model: ResolvedModel, width: int, height: int, seconds: int
 ) -> float | None:
     """The measured cost of one combination, if it is known."""
-    table = MEASURED.get(model.civision_value)
+    table = _table_for(model)
     if not table:
         return None
     entry = table.get((width, height))
@@ -192,7 +240,7 @@ async def measure(
                 seconds=seconds,
                 guidance_scale=model.default_guidance_scale,
                 num_inference_steps=model.default_steps,
-                accelerate_lora=model.accelerate_lora or None,
+                accelerate_lora=model.accelerate_lora,
                 image_input="https://example.com/reference.png"
                 if model.supports_img2video and not model.supports_txt2video
                 else None,

@@ -6,10 +6,13 @@ stubbed out, so no magicubes are spent.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models import VideoJob
 
 # A key that exists in the test database. The service hashes the key before
 # storing it, so the plaintext has to be created once and looked up by hash.
@@ -50,6 +53,58 @@ def client(monkeypatch, api_key):
         yield TestClient(app, follow_redirects=False)
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def anon_client():
+    """A client with **no** API-key override, so the guard really runs.
+
+    The test database holds no API keys, so any `Authorization` header is
+    rejected; a request without one is rejected for the missing key.
+    """
+    return TestClient(app, follow_redirects=False)
+
+
+def _make_job(
+    video_id: str,
+    *,
+    status: str = "completed",
+    filename: str | None = None,
+    upstream_url: str | None = None,
+):
+    """Insert a job row straight into the test database.
+
+    The route reads the row and, for a completed job, the file it points at.
+    No worker is involved, so no generation is started.
+    """
+    from app.db import SessionLocal, _engine
+    from app.models import utcnow
+
+    async def insert():
+        async with SessionLocal() as session:
+            now = utcnow()
+            job = VideoJob(
+                id=video_id,
+                model="minimax-h3-turbo",
+                prompt="a bird",
+                seconds="4",
+                size="720x1280",
+                width=720,
+                height=1280,
+                status=status,
+                progress=100 if status == "completed" else 0,
+                local_path=filename,
+                upstream_url=upstream_url,
+                created_at=now,
+                created_at_ts=int(now.timestamp()),
+            )
+            session.add(job)
+            await session.commit()
+        # The pool would otherwise hand the connection to the test client's
+        # event loop, and aiosqlite connections cannot cross loops.
+        await _engine.dispose()
+
+    asyncio.run(insert())
 
 
 class TestAdminGuard:
@@ -147,6 +202,118 @@ class TestVideoCreation:
         )
         assert r.status_code == 400
         assert r.json()["error"]["param"] == "input_reference"
+
+
+class TestPublicVideoAccess:
+    """The status and download routes must not require an API key.
+
+    A video URL gets handed to a browser, a player or a third-party page,
+    none of which can present a key. The job id is the capability.
+    """
+
+    def test_status_is_readable_without_an_api_key(self, anon_client):
+        _make_job("video_public_status")
+        r = anon_client.get("/v1/videos/video_public_status")
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == "video_public_status"
+        assert r.json()["status"] == "completed"
+
+    def test_content_is_downloadable_without_an_api_key(self, anon_client):
+        from app.config import get_settings
+
+        settings = get_settings()
+        name = "video_public_download.mp4"
+        (settings.storage_dir / name).write_bytes(b"fake-mp4-bytes")
+        _make_job("video_public_download", filename=name)
+
+        r = anon_client.get("/v1/videos/video_public_download/content")
+        assert r.status_code == 200, r.text
+        assert r.content == b"fake-mp4-bytes"
+        assert r.headers["content-type"] == "video/mp4"
+        # Served inline so the URL can be used as a <video> source.
+        assert r.headers["content-disposition"].startswith("inline")
+
+    def test_content_can_be_forced_to_download(self, anon_client):
+        from app.config import get_settings
+
+        settings = get_settings()
+        name = "video_public_forced_download.mp4"
+        (settings.storage_dir / name).write_bytes(b"fake-mp4-bytes")
+        _make_job("video_public_forced_download", filename=name)
+
+        r = anon_client.get(
+            "/v1/videos/video_public_forced_download/content?download=true"
+        )
+        assert r.status_code == 200, r.text
+        assert r.headers["content-disposition"].startswith("attachment")
+
+    def test_content_answers_a_range_request(self, anon_client):
+        from app.config import get_settings
+
+        settings = get_settings()
+        name = "video_public_range.mp4"
+        (settings.storage_dir / name).write_bytes(b"0123456789")
+        _make_job("video_public_range", filename=name)
+
+        r = anon_client.get(
+            "/v1/videos/video_public_range/content",
+            headers={"Range": "bytes=2-5"},
+        )
+        assert r.status_code == 206
+        assert r.content == b"2345"
+
+    def test_an_invalid_api_key_still_cannot_create_a_job(self, anon_client):
+        r = anon_client.post(
+            "/v1/videos",
+            headers={"Authorization": "Bearer sk-not-a-real-key"},
+            json={"model": "minimax-h3-turbo", "prompt": "a bird"},
+        )
+        assert r.status_code == 401
+
+    def test_listing_still_requires_an_api_key(self, anon_client):
+        r = anon_client.get("/v1/videos")
+        assert r.status_code == 401
+
+    def test_a_missing_job_is_a_404_not_a_401(self, anon_client):
+        r = anon_client.get("/v1/videos/video_does_not_exist/content")
+        assert r.status_code == 404
+        assert r.json()["error"]["type"] == "invalid_request_error"
+
+    def test_a_job_that_is_not_ready_is_a_409(self, anon_client):
+        _make_job("video_public_pending", status="queued")
+        r = anon_client.get("/v1/videos/video_public_pending/content")
+        assert r.status_code == 409
+        assert "not ready" in r.json()["error"]["message"]
+
+    def test_content_falls_back_to_the_upstream_url(self, anon_client, monkeypatch):
+        """The local copy is gone after TTL cleanup; the CDN still has it."""
+        _make_job("video_public_upstream", upstream_url="https://cdn.example.com/clip.mp4")
+
+        class FakeResponse:
+            status_code = 200
+            content = b"upstream-bytes"
+            headers = {"content-length": "14"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                assert headers is None or "Range" not in headers
+                return FakeResponse()
+
+        monkeypatch.setattr("httpx.AsyncClient", FakeClient)
+
+        r = anon_client.get("/v1/videos/video_public_upstream/content")
+        assert r.status_code == 200, r.text
+        assert r.content == b"upstream-bytes"
+        assert r.headers["content-disposition"].startswith("inline")
 
 
 async def _noop_enqueue(session, job) -> None:

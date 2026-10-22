@@ -17,6 +17,7 @@ from app.civision.accounts import (
     refresh_balance,
     validate_account,
 )
+from app.civision.mapping import DEFAULT_ALIASES
 from app.config import get_settings
 from app.crypto import hash_secret, new_api_key
 from app.db import get_session
@@ -373,17 +374,20 @@ async def models_page(
 ) -> HTMLResponse:
     catalog = await catalog_service.get(session)
     aliases = (await session.execute(select(ModelAlias))).scalars().all()
+    alias_names = {row.alias for row in aliases} | set(DEFAULT_ALIASES)
     return templates.TemplateResponse(
         request,
         "models.html",
         {
             "catalog": catalog,
             "aliases": aliases,
-            # One block per real model; the aliases point at the same ones.
+            # One block per real model. The aliases point at the same ones, so
+            # they are skipped here; the two MiniMax-H3 variants are separate
+            # models and each gets its own block.
             "cost_lines": [
                 line
                 for m in catalog.models
-                if not m.requested.startswith("sora-")
+                if m.requested not in alias_names
                 for line in costs.lines_for(m)
             ],
             "message": None,

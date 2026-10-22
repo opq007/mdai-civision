@@ -155,15 +155,27 @@ GET /api/v1/auth/login/generate/oauth2/url
 
 > 注：目录是**实时**的，不硬编码 —— 后台按上述接口拉取并缓存。
 
-**本服务只暴露 3 个模型**（`app/civision/mapping.py` 的 `ALLOWED_MODELS`）：
+**本服务暴露 4 个模型**（`app/civision/mapping.py` 的 `ALLOWED_MODELS` + `MODEL_VARIANTS`）：
 
-| 公用名 | civision 值 | versionId | 能力 | 时长 |
-|---|---|---|---|---|
-| `wan2.1-t2v-1.3b` | `WAN_VIDEO_2_1_T2V_1_3_B` | 546 | 文生视频 | 3 / 5 秒 |
-| `wan2.1-i2v-14b` | `WAN_VIDEO_2_1_I2V_14_B` | 648 | **图生视频** | 3 / 5 秒 |
-| `minimax-h3` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 |
+| 公用名 | civision 值 | versionId | 能力 | 时长 | 加速 | 步数 |
+|---|---|---|---|---|---|---|
+| `wan2.1-t2v-1.3b` | `WAN_VIDEO_2_1_T2V_1_3_B` | 546 | 文生视频 | 3 / 5 秒 | — | 50 |
+| `wan2.1-i2v-14b` | `WAN_VIDEO_2_1_I2V_14_B` | 648 | **图生视频** | 3 / 5 秒 | — | 50 |
+| `minimax-h3-turbo` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | **开** | 4 |
+| `minimax-h3` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | 关 | 20 |
 
-外加两个 OpenAI 别名：`sora-2` → `wan2.1-t2v-1.3b`，`sora-2-pro` → `minimax-h3`。
+外加两个 OpenAI 别名：`sora-2` → `minimax-h3-turbo`，`sora-2-pro` → `minimax-h3`。
+
+> **两个 `minimax-h3` 是同一个上游模型**（versionId 150867），区别只在
+> civision 网页上的「LoRA 推理加速」开关：开 → 步数钉在 4、价格减半；
+> 关 → 按模型自己的 20 步跑。两种设置出片效果差别明显，所以拆成两个模型名。
+>
+> 变体**不能**用别名表表达：别名表把名字映射到 civision *值*，
+> 而两个变体共用 `MINIMAX_H3`。所以变体声明在 `MODEL_VARIANTS` 里。
+>
+> 加速状态用三态表示（`None` / `True` / `False`）：
+> `None` = 完全不发 `videoInferenceArgs` 块（Wan 系列带上会被上游拒），
+> `True` / `False` = 显式发送（网页开关开 / 关时的真实行为）。
 
 其余 5 个上游模型（Wan2.1 T2V-14B、Wan2.1 FLF2V-14B、Wan2.2 TI2V-5B、
 Wan2.2 T2V-A14B、Wan2.2 I2V-A14B）不对外暴露。
@@ -240,7 +252,7 @@ Wan2.2 T2V-A14B、Wan2.2 I2V-A14B）不对外暴露。
 | 640×480 | 8 | 13 | 25 |
 | 848×480 | 17 | 28 | 56 |
 
-**MiniMax-H3（versionId 150867，LoRA 加速开启，4 步）**
+**MiniMax-H3 turbo（versionId 150867，LoRA 加速开启，4 步）**
 
 | 尺寸 | 3s | 5s | 10s |
 |---|---|---|---|
@@ -249,6 +261,21 @@ Wan2.2 T2V-A14B、Wan2.2 I2V-A14B）不对外暴露。
 | 768×768 | 34 | 56 | 113 |
 | 960×768 | 34 | 56 | 113 |
 | 1280×768 | 34 | 56 | 113 |
+
+**MiniMax-H3（versionId 150867，LoRA 加速关闭，20 步）**
+
+| 尺寸 | 3s | 5s | 10s |
+|---|---|---|---|
+| 768×1280 | 68 | 113 | 225 |
+| 768×960 | 68 | 113 | 225 |
+| 768×768 | 68 | 113 | 225 |
+| 960×768 | 68 | 113 | 225 |
+| 1280×768 | 68 | 113 | 225 |
+
+> 关掉加速后步数从 4 涨到 20，价格正好翻倍。
+> 实测「完全不传 `videoInferenceArgs`」与「显式传 `accelerateLora: false`」
+> 价格相同（都是 68），说明上游按步数计价，开关只是标记。
+> 网页关闭开关时发送的正是 `{accelerateLora: false}` 并保持 20 步。
 
 **规律**：消耗只取决于**像素总量**和**时长**，与具体宽高比无关。
 三个「小」尺寸（480×640 / 480×480 / 640×480）比其他尺寸便宜约 1/2。
@@ -408,12 +435,16 @@ DELETE /v1/videos/{video_id}
                                           │
                           ┌───────────────▼──────────────────────┐
                           │  FastAPI 应用                         │
-                          │  ├─ 鉴权中间件 (API Key)              │
+                          │  ├─ 鉴权中间件 (API Key, 仅写操作)     │
                           │  ├─ 全局限流 (令牌桶)                  │
                           │  ├─ 任务队列 (SQLite)                 │
                           │  ├─ 调度器: 轮询 + 异常/配额切换       │
                           │  └─ 产物缓存 (本地磁盘 + TTL 清理)      │
                           └───────────────┬──────────────────────┘
+                                          │
+   浏览器 / <video> 播放器 / 第三方页面        │
+          ───────────────▶│  /v1/videos/{id}[/content]  (公开)    │
+                          │  video_id 即凭证, 不需要 API Key     │
                                           │
                           ┌───────────────▼──────────────────────┐
                           │  Civision 上游适配器 (httpx)           │
@@ -491,24 +522,51 @@ mdai-civision/
 
 `Authorization: Bearer <api_key>`，API Key 在后台创建/禁用/删除，明文仅创建时展示一次，库中存哈希。
 
+**例外：只读的单任务接口不需要 API Key。**
+
+`GET /v1/videos/{id}` 与 `GET /v1/videos/{id}/content` 挂在一个**不带**
+`require_api_key` 依赖的独立 router 上。理由：
+
+- 视频链接的最终消费者是浏览器、`<video>` 播放器或第三方页面，它们没有 API Key；
+- `video_id` 是 `uuid4().hex[:24]` 派生的不可猜测随机串，**id 本身即凭证**；
+- 任务详情和产物都是「知道自己 id 就能看」的语义，无需再叠加一层身份。
+
+所有写操作（create / list / delete / models）仍然要求 API Key。公开接口同样
+受全局限流保护。
+
 ### 3.2 端点
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/v1/videos` | 创建视频任务，异步，立即返回 `queued` 状态 |
-| GET | `/v1/videos/{id}` | 查询任务状态 |
-| GET | `/v1/videos/{id}/content` | 下载 MP4 |
-| GET | `/v1/videos` | 列出任务（分页） |
-| DELETE | `/v1/videos/{id}` | 删除任务及其缓存文件 |
-| GET | `/v1/models` | 列出可用模型（OpenAI `Model` 列表形态） |
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/v1/videos` | 🔑 | 创建视频任务，异步，立即返回 `queued` 状态 |
+| GET | `/v1/videos/{id}` | 🔓 | 查询任务状态 |
+| GET | `/v1/videos/{id}/content` | 🔓 | 下载 MP4 |
+| GET | `/v1/videos` | 🔑 | 列出任务（分页） |
+| DELETE | `/v1/videos/{id}` | 🔑 | 删除任务及其缓存文件 |
+| GET | `/v1/models` | 🔑 | 列出可用模型（OpenAI `Model` 列表形态） |
 
-### 3.3 模型命名（已确认：全量导出 + sora 别名）
+🔓 = 公开（不需要 API Key），🔑 = 需要 `Authorization: Bearer <api_key>`。
 
-对外同时暴露：
+`GET /v1/videos/{id}/content` 的响应约定：
 
-1. **8 个 civision 原生模型**，命名为小写连字符形式：
-   `wan2.1-t2v-1.3b` / `wan2.1-t2v-14b` / `wan2.1-i2v-14b` / `wan2.1-flf2v-14b` / `wan2.2-ti2v-5b` / `wan2.2-t2v-a14b` / `wan2.2-i2v-a14b` / `minimax-h3`
-2. **sora 别名**：`sora-2` → 默认模型（默认 `wan2.2-t2v-a14b`），`sora-2-pro` → 高配模型（默认 `minimax-h3`）
+- 默认 `Content-Disposition: inline`，可直接作为 `<video src>` 使用；
+- 加 `?download=true` 改为 `attachment`，强制下载；
+- 本地文件走 `FileResponse`，**支持 `Range` 请求**（浏览器播放器可拖动进度条）；
+- 本地文件已被 TTL 清理时，回源转发上游 CDN URL；
+- 任务未完成返回 409，任务不存在返回 404。
+
+### 3.3 模型命名（已确认：精选暴露 + sora 别名）
+
+对外暴露：
+
+1. **4 个实际模型**：
+   `wan2.1-t2v-1.3b` / `wan2.1-i2v-14b` / `minimax-h3-turbo` / `minimax-h3`
+   （后两个是同一个上游模型 `MINIMAX_H3` 的加速开 / 关两个变体，见 §1.5）
+2. **sora 别名**：`sora-2` → `minimax-h3-turbo`，
+   `sora-2-pro` → `minimax-h3`
+
+上游另外 5 个模型不对外开放。放开的方式是在 `ALLOWED_MODELS` 里加值；
+如果新模型也需要变体机制，在 `MODEL_VARIANTS` 里声明。
 
 别名映射表存于数据库，可在后台修改。
 
@@ -572,7 +630,8 @@ civision 每个模型支持的宽高不同，因此尺寸不是全局查表，�
 | 情况 | HTTP | OpenAI error.type |
 |---|---|---|
 | 参数非法（prompt 空、size 不支持、模型未知） | 400 | `invalid_request_error` |
-| API Key 缺失/无效 | 401 | `invalid_request_error` |
+| API Key 缺失/无效（仅写操作需要） | 401 | `invalid_request_error` |
+| 视频未就绪（`content` 路由） | 409 | `invalid_request_error` |
 | 配额不足（魔粒耗尽） | 429 | `rate_limit_error` |
 | 上游限流 / 提交过快（实测 `code: 50001`） | 429 | `rate_limit_error` |
 | 账号会话失效且无法自动续期 | 401 | `invalid_request_error` |

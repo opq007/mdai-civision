@@ -112,34 +112,49 @@ curl -X POST http://127.0.0.1:8000/v1/videos \
 轮询 `GET /v1/videos/{id}` 直到 `status` 变成 `completed`，然后
 `GET /v1/videos/{id}/content` 取回 MP4。
 
+> 查询状态和下载 MP4 **不需要 API Key**：只要知道 `video_id` 就能直接访问，
+> 方便把链接丢给浏览器、播放器或第三方页面。加 `?download=true` 强制下载，
+> 不加则以内联方式返回（可直接作为 `<video src>` 使用）。
+
 ---
 
 ## 接口
 
 ### OpenAI 兼容
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/v1/videos` | 创建任务，立即返回 `queued` |
-| GET | `/v1/videos/{id}` | 查询状态 |
-| GET | `/v1/videos/{id}/content` | 下载 MP4 |
-| GET | `/v1/videos` | 列出任务 |
-| DELETE | `/v1/videos/{id}` | 删除任务与缓存 |
-| GET | `/v1/models` | 列出可用模型 |
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/v1/videos` | 🔑 | 创建任务，立即返回 `queued` |
+| GET | `/v1/videos/{id}` | 🔓 | 查询状态 |
+| GET | `/v1/videos/{id}/content` | 🔓 | 下载 MP4 |
+| GET | `/v1/videos` | 🔑 | 列出任务 |
+| DELETE | `/v1/videos/{id}` | 🔑 | 删除任务与缓存 |
+| GET | `/v1/models` | 🔑 | 列出可用模型 |
 
 鉴权：`Authorization: Bearer <api key>`。
 
+🔓 = **不需要 API Key**。`video_id` 是不可猜测的随机串，本身即凭证，
+所以查询和下载可以直接暴露给外部调用方。写操作仍然全部需要 API Key。
+
 ### 模型
 
-只开放 3 个，外加两个 OpenAI 别名：
+开放 4 个，外加两个 OpenAI 别名：
 
-| 名称 | 指向 | 能力 | 时长 |
-|---|---|---|---|
-| `wan2.1-t2v-1.3b` | Wan2.1-T2V-1.3B | 文生视频 | 3 / 5 秒 |
-| `wan2.1-i2v-14b` | Wan2.1-I2V-14B-720P | **图生视频** | 3 / 5 秒 |
-| `minimax-h3` | MiniMax-H3 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 |
-| `sora-2` | → `wan2.1-t2v-1.3b` | 别名 | 3 / 5 秒 |
-| `sora-2-pro` | → `minimax-h3` | 别名 | 3 / 5 / 10 秒 |
+| 名称 | 指向 | 能力 | 时长 | 加速 | 步数 |
+|---|---|---|---|---|---|
+| `wan2.1-t2v-1.3b` | Wan2.1-T2V-1.3B | 文生视频 | 3 / 5 秒 | — | 50 |
+| `wan2.1-i2v-14b` | Wan2.1-I2V-14B-720P | **图生视频** | 3 / 5 秒 | — | 50 |
+| `minimax-h3-turbo` | MiniMax-H3 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | **开** | 4 |
+| `minimax-h3` | MiniMax-H3 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | 关 | 20 |
+| `sora-2` | → `minimax-h3-turbo` | 别名 | 3 / 5 / 10 秒 | 开 | 4 |
+| `sora-2-pro` | → `minimax-h3` | 别名 | 3 / 5 / 10 秒 | 关 | 20 |
+
+> **两个 `minimax-h3` 是同一个上游模型**，区别只在网页上的「LoRA 推理加速」开关：
+> 打开时采样步数被钉在 4、价格减半；关闭时按模型自己的 20 步跑。
+> 两种设置出片效果差别明显，所以拆成两个模型名而不是一个请求参数。
+>
+> `sora-2` / `sora-2-pro` 指向 MiniMax-H3 的两个变体，而不是 Wan 系列 ——
+> OpenAI 的 Sora 本身就是「快版 / 增强版」两档，语义上更接近。
 
 上游还有 5 个视频模型不对外开放。要放开的话，编辑
 `app/civision/mapping.py` 的 `ALLOWED_MODELS`。
@@ -164,15 +179,23 @@ curl -X POST http://127.0.0.1:8000/v1/videos \
 | 720×960 / 720×720 / 960×720 | 17 | 28 | — |
 | 480×640 / 480×480 / 640×480 | 8 | 13 | 25 |
 
-**MiniMax-H3**
+**MiniMax-H3 turbo（`minimax-h3-turbo`，开加速，4 步）**
 
 | 尺寸 | 3s | 5s | 10s |
 |---|---|---|---|
 | 全部 5 种 | 34 | 56 | 113 |
 
+**MiniMax-H3（`minimax-h3`，关加速，20 步）**
+
+| 尺寸 | 3s | 5s | 10s |
+|---|---|---|---|
+| 全部 5 种 | 68 | 113 | 225 |
+
 消耗只取决于**像素总量**和**时长**，与宽高比无关。
 网页对 Wan 系列隐藏了 10 秒选项（标注「敬请期待」），但接口实际接受 —— 服务层
 仍只对 MiniMax-H3 开放 10 秒，与网页行为一致。
+
+关掉加速后步数从 4 涨到 20，价格随之翻倍（3s：34 → 68）。
 
 ### 参数映射
 
@@ -182,7 +205,7 @@ curl -X POST http://127.0.0.1:8000/v1/videos \
 **尺寸** —— 按**所选模型自己支持的尺寸集合**解析，不是全局查表。
 Wan 系列有两档（720 档 / 480 档），MiniMax-H3 只有 768 档：
 
-| 请求 | Wan 系列 | MiniMax-H3 |
+| 请求 | Wan 系列 | MiniMax-H3（两个变体相同） |
 |---|---|---|
 | `720x1280` | 720 × 1280 | 768 × 1280 |
 | `1280x720` | 1280 × 720 | 1280 × 768 |
@@ -195,6 +218,10 @@ Wan 系列有两档（720 档 / 480 档），MiniMax-H3 只有 768 档：
 该比例不存在则回退到模型默认尺寸。
 
 额外也接受 civision 的原生宽高（如 `480x480`、`960x720`、`720x960`）。
+
+**采样步数** —— 由模型决定，不由请求决定：Wan 系列 50 步，
+`minimax-h3-turbo` 4 步（加速），`minimax-h3` 20 步（不加速）。
+请求里可以用 `num_inference_steps` 覆盖，但一般不需要。
 
 ### 首尾帧（MiniMax-H3）
 
@@ -227,7 +254,8 @@ curl -X POST http://127.0.0.1:8000/v1/videos \
 | 情况 | HTTP | type |
 |---|---|---|
 | 参数非法 / 模型不存在 / 校验失败 | 400 | `invalid_request_error` |
-| API Key 缺失或无效 | 401 | `invalid_request_error` |
+| API Key 缺失或无效（仅写操作） | 401 | `invalid_request_error` |
+| 视频未就绪 | 409 | `invalid_request_error` |
 | 魔粒不足 / 上游限流 | 429 | `rate_limit_error` |
 | 上游 5xx | 503 | `server_error` |
 

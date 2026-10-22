@@ -62,7 +62,7 @@ class Maintenance:
 
     async def check_sessions(self) -> dict:
         """Validate every account and refresh balances."""
-        summary = {"checked": 0, "ok": 0, "expired": 0}
+        summary = {"checked": 0, "ok": 0, "expired": 0, "unreachable": 0}
         async with session_scope() as session:
             accounts = (await session.execute(select(Account))).scalars().all()
             for account in accounts:
@@ -77,6 +77,16 @@ class Maintenance:
                             await refresh_balance(session, account)
                         except Exception:  # noqa: BLE001
                             pass
+                    elif info.unreachable:
+                        # ModelScope is down or the network is broken. This is
+                        # not a session problem, so the account keeps its
+                        # status and no alert goes out.
+                        summary["unreachable"] += 1
+                        log.warning(
+                            "could not reach ModelScope for %s: %s",
+                            account.name,
+                            info.reason,
+                        )
                     else:
                         summary["expired"] += 1
                         if account.status != "expired":

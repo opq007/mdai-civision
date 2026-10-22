@@ -143,10 +143,41 @@ class TestSubmitVideoBody:
         assert "mode" not in body["videoInferenceArgs"]
         assert "references" not in body["videoInferenceArgs"]
 
+    async def test_acceleration_off_is_sent_explicitly(self, client, calls):
+        """The page sends the flag when the switch is off, not nothing.
+
+        `None` (omit the block) and `False` (send it, disabled) are
+        different requests, and only the first one is legal for the Wan
+        models.
+        """
+        await client.submit_video(
+            version_id=150867,
+            prompt="a bird",
+            num_inference_steps=20,
+            predict_type="IMG_2_VIDEO",
+            image_input="https://example.com/start.png",
+            accelerate_lora=False,
+        )
+        _, body = calls[0]
+        assert body["videoInferenceArgs"] == {"accelerateLora": False}
+        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 20
+
+    async def test_no_acceleration_block_for_the_wan_models(self, client, calls):
+        """The Wan models reject a videoInferenceArgs block outright."""
+        await client.submit_video(
+            version_id=648,
+            prompt="a bird",
+            num_inference_steps=50,
+            predict_type="IMG_2_VIDEO",
+            image_input="https://example.com/start.png",
+            accelerate_lora=None,
+        )
+        _, body = calls[0]
+        assert "videoInferenceArgs" not in body
+
 
 class TestEstimateQuotaBody:
     """The estimate body must mirror the submit body, field for field."""
-
     async def test_mirrors_the_submit_body(self, client, calls):
         await client.estimate_quota(
             version_id=150867,
@@ -201,3 +232,140 @@ class TestEstimateQuotaBody:
         request = body["video_predict_task_request"]
         assert "image_input_front_args" not in request
         assert "extra_image_input_front_args" not in request
+
+
+class TestModelVariantsReachTheWire:
+    """Each public model name must produce its own upstream parameters.
+
+    The two MiniMax-H3 names are the same upstream model with the civision
+    page's acceleration switch on and off. They differ in the step count
+    and in the acceleration flag, and both differences have to survive all
+    the way into the request body.
+    """
+
+    @pytest.fixture
+    def catalog(self):
+        from app.civision.mapping import DEFAULT_ALIASES, build_catalog
+
+        from tests.test_mapping import SAMPLE_CATALOG
+
+        return build_catalog(SAMPLE_CATALOG, dict(DEFAULT_ALIASES))
+
+    async def _body_for(self, client, calls, model):
+        await client.submit_video(
+            version_id=model.version_id,
+            prompt="a bird",
+            width=model.default_width,
+            height=model.default_height,
+            seconds=3,
+            guidance_scale=model.default_guidance_scale,
+            num_inference_steps=model.default_steps,
+            predict_type="TXT_2_VIDEO",
+            accelerate_lora=model.accelerate_lora,
+        )
+        return calls[-1][1]
+
+    async def test_turbo_sends_four_steps_and_acceleration_on(
+        self, client, calls, catalog
+    ):
+        from app.civision.mapping import resolve_model
+
+        model = resolve_model("minimax-h3-turbo", catalog)
+        body = await self._body_for(client, calls, model)
+        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 4
+        assert body["videoInferenceArgs"] == {"accelerateLora": True}
+
+    async def test_plain_minimax_sends_twenty_steps_and_acceleration_off(
+        self, client, calls, catalog
+    ):
+        from app.civision.mapping import resolve_model
+
+        model = resolve_model("minimax-h3", catalog)
+        body = await self._body_for(client, calls, model)
+        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 20
+        assert body["videoInferenceArgs"] == {"accelerateLora": False}
+
+    async def test_the_two_variants_differ_on_the_wire(self, client, calls, catalog):
+        from app.civision.mapping import resolve_model
+
+        turbo = await self._body_for(
+            client, calls, resolve_model("minimax-h3-turbo", catalog)
+        )
+        plain = await self._body_for(
+            client, calls, resolve_model("minimax-h3", catalog)
+        )
+        assert turbo != plain
+        assert (
+            turbo["basicDiffusionArgs"]["numInferenceSteps"]
+            != plain["basicDiffusionArgs"]["numInferenceSteps"]
+        )
+        assert (
+            turbo["videoInferenceArgs"]["accelerateLora"]
+            != plain["videoInferenceArgs"]["accelerateLora"]
+        )
+
+    async def test_sora_aliases_reach_the_right_variant(
+        self, client, calls, catalog
+    ):
+        from app.civision.mapping import resolve_model
+
+        sora = await self._body_for(
+            client, calls, resolve_model("sora-2", catalog)
+        )
+        assert sora["basicDiffusionArgs"]["numInferenceSteps"] == 4
+        assert sora["videoInferenceArgs"] == {"accelerateLora": True}
+
+        pro = await self._body_for(
+            client, calls, resolve_model("sora-2-pro", catalog)
+        )
+        assert pro["basicDiffusionArgs"]["numInferenceSteps"] == 20
+        assert pro["videoInferenceArgs"] == {"accelerateLora": False}
+
+    async def test_wan_models_send_no_acceleration_block(
+        self, client, calls, catalog
+    ):
+        from app.civision.mapping import resolve_model
+
+        model = resolve_model("wan2.1-t2v-1.3b", catalog)
+        body = await self._body_for(client, calls, model)
+        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 50
+        assert "videoInferenceArgs" not in body
+
+
+class TestSessionProbeDistinguishesNetworkFromAuth:
+    """A network failure must not be reported as a rejected session.
+
+    `check_session` feeds `validate_account`, which expires an account when
+    the probe comes back unauthenticated. If a DNS blip counted as
+    "unauthenticated", a temporary outage would take the account out of the
+    pool for good.
+    """
+
+    async def test_unreachable_upstream_is_flagged(self, monkeypatch):
+        from app.civision.client import CivisionClient, UpstreamUnavailable
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def boom(self):
+            raise UpstreamUnavailable("cannot reach ModelScope: DNS failure")
+
+        monkeypatch.setattr(CivisionClient, "whoami", boom)
+
+        info = await client.check_session()
+        assert info.authenticated is False
+        assert info.unreachable is True
+        assert "cannot reach ModelScope" in info.reason
+
+    async def test_a_rejected_session_is_not_flagged_unreachable(self, monkeypatch):
+        from app.civision.client import CivisionClient, NotAuthenticated
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def rejected(self):
+            raise NotAuthenticated()
+
+        monkeypatch.setattr(CivisionClient, "whoami", rejected)
+
+        info = await client.check_session()
+        assert info.authenticated is False
+        assert info.unreachable is False

@@ -117,6 +117,10 @@ class SessionInfo:
     username: str = ""
     cookie_jar: dict[str, str] = field(default_factory=dict)
     reason: str = ""
+    # True when the probe failed because ModelScope could not be reached,
+    # rather than because the session was rejected. A network blip must not
+    # mark the account expired.
+    unreachable: bool = False
 
 
 class CivisionClient:
@@ -272,6 +276,16 @@ class CivisionClient:
         except NotAuthenticated:
             return SessionInfo(
                 authenticated=False, cookie_jar=jar, reason="ModelScope rejected the session"
+            )
+        except UpstreamUnavailable as exc:
+            # The network is down, not the session. Reporting this as
+            # "not authenticated" would mark the account expired and take it
+            # out of the pool for good.
+            return SessionInfo(
+                authenticated=False,
+                cookie_jar=jar,
+                reason=f"could not reach ModelScope: {exc.message}",
+                unreachable=True,
             )
         except CivisionError as exc:
             return SessionInfo(

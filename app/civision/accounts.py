@@ -73,6 +73,10 @@ async def validate_account(
         account.status = "active"
         account.last_error = None
         save_jar(account, info.cookie_jar)
+    elif info.unreachable:
+        # ModelScope could not be reached. The session is not known to be
+        # bad, so leave the account as it is rather than expiring it.
+        account.last_error = info.reason
     else:
         if account.status != "disabled":
             account.status = "expired"

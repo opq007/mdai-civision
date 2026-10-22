@@ -7,6 +7,7 @@ import pytest
 from app.civision.client import parse_cookie_header
 from app.civision.mapping import (
     ALLOWED_MODELS,
+    DEFAULT_ALIASES,
     build_catalog,
     normalize_model_name,
     resolve_model,
@@ -100,8 +101,7 @@ SAMPLE_CATALOG = [
 
 @pytest.fixture
 def models():
-    return build_catalog(SAMPLE_CATALOG, {"sora-2": "WAN_VIDEO_2_1_T2V_1_3_B",
-                                           "sora-2-pro": "MINIMAX_H3"})
+    return build_catalog(SAMPLE_CATALOG, dict(DEFAULT_ALIASES))
 
 
 class TestParseCookieHeader:
@@ -244,7 +244,7 @@ class TestModelResolution:
 
     def test_alias(self, models):
         m = resolve_model("sora-2", models)
-        assert m is not None and m.version_id == 546
+        assert m is not None and m.version_id == 150867
 
     def test_sora_2_pro_points_at_minimax_h3(self, models):
         m = resolve_model("sora-2-pro", models)
@@ -268,32 +268,64 @@ class TestModelResolution:
     def test_model_defaults_come_from_upstream(self, models):
         h3 = resolve_model("minimax-h3", models)
         assert h3.default_guidance_scale == 4
-        # MiniMax-H3's published step count is 20, but the civision page runs
-        # it with LoRA acceleration, which pins the steps to 4.
-        assert h3.default_steps == 4
+        # MiniMax-H3 without acceleration runs at its published step count.
+        assert h3.default_steps == 20
+        turbo = resolve_model("minimax-h3-turbo", models)
+        # With LoRA acceleration the steps are pinned to 4.
+        assert turbo.default_steps == 4
         wan = resolve_model("wan2.1-t2v-1.3b", models)
         assert wan.default_guidance_scale == 7.5
         assert wan.default_steps == 50
 
 
 class TestAccelerateLora:
-    """MiniMax-H3 turns LoRA acceleration on by default on the civision page.
+    """MiniMax-H3 has a LoRA acceleration switch on the civision page.
 
-    That pins numInferenceSteps to 4 and halves the magicube cost. If the
-    service omits it, the estimate comes out at roughly double what the page
-    quotes.
+    On, it pins numInferenceSteps to 4 and halves the magicube cost; off, the
+    model runs at its published 20 steps. The two settings are exposed as two
+    model names, because the results differ noticeably.
     """
 
-    def test_minimax_enables_acceleration_with_four_steps(self, models):
-        h3 = resolve_model("sora-2-pro", models)
-        assert h3.accelerate_lora is True
-        assert h3.default_steps == 4
+    def test_turbo_enables_acceleration_with_four_steps(self, models):
+        turbo = resolve_model("minimax-h3-turbo", models)
+        assert turbo.accelerate_lora is True
+        assert turbo.default_steps == 4
 
-    def test_other_models_do_not_use_it(self, models):
-        for name in ("sora-2", "wan2.1-t2v-1.3b", "wan2.1-i2v-14b"):
+    def test_plain_minimax_disables_acceleration_with_twenty_steps(self, models):
+        h3 = resolve_model("minimax-h3", models)
+        assert h3.accelerate_lora is False
+        assert h3.default_steps == 20
+
+    def test_other_models_send_no_acceleration_block(self, models):
+        """The Wan models reject a videoInferenceArgs block outright."""
+        for name in ("wan2.1-t2v-1.3b", "wan2.1-i2v-14b"):
             m = resolve_model(name, models)
-            assert m.accelerate_lora is False
+            assert m.accelerate_lora is None
             assert m.default_steps == 50
+
+    def test_both_variants_are_the_same_upstream_model(self, models):
+        turbo = resolve_model("minimax-h3-turbo", models)
+        plain = resolve_model("minimax-h3", models)
+        assert turbo.civision_value == plain.civision_value
+        assert turbo.version_id == plain.version_id
+        assert turbo.sizes == plain.sizes
+        assert turbo.seconds == plain.seconds
+
+
+class TestOpenAIAliases:
+    """The OpenAI names point at the two MiniMax-H3 variants."""
+
+    def test_sora_2_points_at_the_accelerated_variant(self, models):
+        m = resolve_model("sora-2", models)
+        assert m is not None
+        assert m.accelerate_lora is True
+        assert m.default_steps == 4
+
+    def test_sora_2_pro_points_at_the_unaccelerated_variant(self, models):
+        m = resolve_model("sora-2-pro", models)
+        assert m is not None
+        assert m.accelerate_lora is False
+        assert m.default_steps == 20
 
 
 class TestEstimateMatchesTheCivisionPage:
@@ -346,7 +378,7 @@ class TestCostTable:
         for m in models:
             if m.requested.startswith("sora-"):
                 continue  # an alias points at a model that is already listed
-            assert lines_for(m), f"no cost table for {m.civision_value}"
+            assert lines_for(m), f"no cost table for {m.requested}"
 
     def test_lookup_matches_the_table(self, models):
         from app.civision.costs import lookup
@@ -355,9 +387,23 @@ class TestCostTable:
         assert lookup(wan, 480, 480, 3) == 2
         assert lookup(wan, 720, 1280, 5) == 6
 
+        # The accelerated variant.
+        turbo = resolve_model("minimax-h3-turbo", models)
+        assert lookup(turbo, 768, 1280, 3) == 34
+        assert lookup(turbo, 768, 1280, 10) == 113
+
+        # The unaccelerated variant costs twice as much: 20 steps, not 4.
         h3 = resolve_model("minimax-h3", models)
-        assert lookup(h3, 768, 1280, 3) == 34
-        assert lookup(h3, 768, 1280, 10) == 113
+        assert lookup(h3, 768, 1280, 3) == 68
+        assert lookup(h3, 768, 1280, 5) == 113
+        assert lookup(h3, 768, 1280, 10) == 225
+
+    def test_the_two_variants_have_different_prices(self, models):
+        from app.civision.costs import lookup
+
+        turbo = resolve_model("minimax-h3-turbo", models)
+        h3 = resolve_model("minimax-h3", models)
+        assert lookup(turbo, 768, 1280, 3) != lookup(h3, 768, 1280, 3)
 
     def test_unknown_combination_has_no_cost(self, models):
         from app.civision.costs import lookup

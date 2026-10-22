@@ -180,6 +180,29 @@ not handed a JSON error envelope. The guard raises `AdminLoginRequired`
 that *returns* a `Response` does **not** short-circuit the route in FastAPI,
 so raising is the only way to do it from a dependency.
 
+### Reading one job needs no API key; writing one does
+
+`app/routers/videos.py` has **two** routers:
+
+- `router` — mounted in `app/main.py` behind `Depends(require_api_key)`:
+  create, list, delete, models.
+- `public_router` — mounted **without** it: `GET /v1/videos/{id}` and
+  `GET /v1/videos/{id}/content`.
+
+A video URL is consumed by browsers, `<video>` players and third-party
+pages, none of which can present an API key. The job id is
+`"video_" + uuid4().hex[:24]` — unguessable, so **the id is the
+capability**. Only the write side needs a real key.
+
+Both routers keep `enforce_rate_limit`; only the key check is dropped.
+
+Two details of the content route that matter:
+
+- it serves `Content-Disposition: inline` by default so the URL works as a
+  `<video src>`; `?download=true` switches to `attachment`
+- the local file is returned via `FileResponse`, which answers `Range`
+  requests, so a player can seek without downloading the whole clip
+
 ### The session is a cookie session
 
 The signed-in state is carried by `m_session_id` and `h_uid`.
@@ -206,7 +229,7 @@ Do not hard-code model lists, size sliders or durations. They are pulled from
 `/api/v1/muse/predict/unauth/defaultTemplateV2` and cached for five minutes.
 `tests/test_mapping.py` carries a trimmed copy for unit tests only.
 
-### Only three models are exposed
+### Four models are exposed, three of them upstream values
 
 `ALLOWED_MODELS` in `app/civision/mapping.py` holds the three upstream models
 this service offers:
@@ -215,12 +238,38 @@ this service offers:
 - `WAN_VIDEO_2_1_I2V_14_B` - Wan2.1-I2V-14B-720P, image to video
 - `MINIMAX_H3` - MiniMax-H3, text / image / first-last frame
 
-The other five upstream models are filtered out. `sora-2` and `sora-2-pro`
-are aliases onto the first and the third.
+The other five upstream models are filtered out.
+
+On top of those, `MODEL_VARIANTS` declares MiniMax-H3's two acceleration
+settings as two public names, so the service exposes four models in total:
+
+| public name | accelerate_lora | steps |
+|---|---|---|
+| `minimax-h3-turbo` | `True` | 4 |
+| `minimax-h3` | `False` | 20 |
+
+`DEFAULT_ALIASES` maps the OpenAI names onto them: `sora-2` →
+`minimax-h3-turbo`, `sora-2-pro` → `minimax-h3`.
+
+**The alias table cannot express a variant.** It maps a name onto a civision
+*value*, and both variants share the value `MINIMAX_H3`. So an alias target
+is a public model name, and the variant list lives in `MODEL_VARIANTS`.
+
+**`accelerate_lora` is a tri-state**, and the distinction matters:
+
+- `None` — send no `videoInferenceArgs` block at all. The Wan models reject
+  the block outright with `videoInferenceArgs 仅支持 MiniMax-H3`.
+- `True` — send `{accelerateLora: true}`, with `numInferenceSteps` pinned to 4.
+- `False` — send `{accelerateLora: false}`, with the model's own 20 steps.
+
+The civision page behaves exactly this way: the switch is on or off, and the
+page sends the flag either way. Writing `model.accelerate_lora or None` would
+collapse `False` into "omit the block" and silently send the wrong parameters.
 
 The cost table in `app/civision/costs.py` was measured with the free
-`estimate-quota` endpoint. It is keyed by civision value, so a newly allowed
-model has no costs until they are measured and added.
+`estimate-quota` endpoint. It is keyed by civision value for the plain
+models and by public name for the variants, because two variants of one
+upstream model cost different amounts (34 vs 68 magicubes for 3 seconds).
 
 ### Image-to-video needs an uploaded reference
 
@@ -249,13 +298,17 @@ MiniMax-H3 is the odd one out:
 - it is the only model with **one size tier** (768-based, no 480 tier)
 - it is the only model that accepts `videoInferenceArgs`; other models reject
   the block with `videoInferenceArgs 仅支持 MiniMax-H3`
-- it has a **LoRA acceleration** switch that the civision page turns on by
-  default, which pins `numInferenceSteps` to 4 and **halves the cost**
+- it has a **LoRA acceleration** switch, which pins `numInferenceSteps` to 4
+  and **halves the cost**
 
 That last one is a trap. MiniMax-H3's *published* default is 20 steps, but
-the page runs it with acceleration on. If the service omits
-`accelerateLora`, the estimate comes out at roughly double what the page
-quotes (68 instead of 34 for 3 seconds).
+the page's switch is on by default. If the service omits `accelerateLora`,
+or sends the wrong step count, the estimate comes out at roughly double what
+the page quotes (68 instead of 34 for 3 seconds).
+
+The acceleration setting is exposed as **two model names** rather than a
+request flag, because the two settings give noticeably different results and
+some scenes want the unaccelerated one.
 
 The rule that follows: **per-model behaviour belongs on the model object**,
 resolved in `build_catalog`, not sprinkled through the request path. The

@@ -18,7 +18,8 @@
     <h2>Available video models</h2>
     <div class="card">
       <table>
-        <thead><tr><th>Public name</th><th>Model</th><th>Type</th><th>Text to video</th>
+        <thead><tr><th>Public name</th><th>Model</th><th>Type</th><th>LoRA accel.</th>
+                   <th>Steps</th><th>Text to video</th>
                    <th>Image to video</th><th>First-last frame</th></tr></thead>
         <tbody>
         {% for m in catalog.models %}
@@ -26,15 +27,26 @@
             <td class="mono">{{ m.requested }}</td>
             <td class="muted">{{ m.label }}</td>
             <td class="mono muted">{{ m.civision_value }}</td>
+            <td>
+              {% if m.accelerate_lora is none %}—
+              {% elif m.accelerate_lora %}on{% else %}off{% endif %}
+            </td>
+            <td>{{ m.default_steps }}</td>
             <td>{{ 'yes' if m.supports_txt2video else '—' }}</td>
             <td>{{ 'yes' if m.supports_img2video else '—' }}</td>
             <td>{{ 'yes' if m.supports_flf2video else '—' }}</td>
           </tr>
         {% else %}
-          <tr><td colspan="6" class="muted">Could not reach the model catalog.</td></tr>
+          <tr><td colspan="8" class="muted">Could not reach the model catalog.</td></tr>
         {% endfor %}
         </tbody>
       </table>
+      <p class="hint">
+        The two <code>minimax-h3</code> names are the same upstream model with
+        the civision page's "LoRA acceleration" switch on and off. Acceleration
+        pins the sampling steps to 4 and halves the price; without it the model
+        runs its own 20 steps, which produces noticeably different results.
+      </p>
     </div>
 
     <h2>Aliases</h2>
@@ -45,12 +57,17 @@
         {% for a in aliases %}
           <tr><td class="mono">{{ a.alias }}</td><td class="mono muted">{{ a.civision_value }}</td></tr>
         {% else %}
-          <tr><td colspan="2" class="muted">
-            Using the built-in defaults: <code>sora-2</code> and <code>sora-2-pro</code>.
-          </td></tr>
+          <tr><td class="mono">sora-2</td><td class="mono muted">minimax-h3-turbo</td></tr>
+          <tr><td class="mono">sora-2-pro</td><td class="mono muted">minimax-h3</td></tr>
         {% endfor %}
         </tbody>
       </table>
+      <p class="hint">
+        The built-in defaults are <code>sora-2</code> &rarr;
+        <code>minimax-h3-turbo</code> and <code>sora-2-pro</code> &rarr;
+        <code>minimax-h3</code>. An alias stored in the database overrides
+        the built-in one.
+      </p>
     </div>
 
     <h2>Magicube cost</h2>
@@ -109,8 +126,9 @@
       </table>
       <p class="hint">
         The cost is the same as a single-image job at the same size and
-        duration: MiniMax-H3 is 34 magicubes for 3 seconds, 56 for 5 and 113
-        for 10, at every size.
+        duration: <code>minimax-h3-turbo</code> is 34 magicubes for 3 seconds,
+        56 for 5 and 113 for 10, at every size. <code>minimax-h3</code>
+        (no acceleration) is 68 / 113 / 225.
       </p>
     </div>
 

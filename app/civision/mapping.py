@@ -64,7 +64,8 @@ DEFAULT_PRO_MODEL = "sora-2-pro"
 #
 #   wan2.1-t2v-1.3b  - cheapest text-to-video
 #   wan2.1-i2v-14b   - image-to-video
-#   minimax-h3       - supports text, image and first/last-frame video
+#   minimax-h3       - MiniMax-H3 without LoRA acceleration
+#   minimax-h3-turbo - the same model with LoRA acceleration
 #
 # Add a civision value here to expose it again.
 ALLOWED_MODELS: tuple[str, ...] = (
@@ -72,6 +73,32 @@ ALLOWED_MODELS: tuple[str, ...] = (
     "WAN_VIDEO_2_1_I2V_14_B",
     "MINIMAX_H3",
 )
+
+# The step count the civision page pins when LoRA acceleration is enabled.
+ACCELERATED_STEPS = 4
+
+# The step count MiniMax-H3 runs at when acceleration is off: its published
+# default from the model catalog.
+MINIMAX_DEFAULT_STEPS = 20
+
+# MiniMax-H3 has a "LoRA acceleration" switch on the civision page. On, it
+# pins numInferenceSteps to 4 and halves the cost; off, the model runs at its
+# published 20 steps. The two settings give noticeably different results, so
+# they are exposed as two separate model names rather than a request flag.
+#
+# The alias table cannot express this: it maps a name onto a civision
+# *value*, and both variants share the value MINIMAX_H3. So the variants are
+# declared here and resolved alongside the real models.
+#
+# Each entry: public name -> (civision value, accelerate_lora, steps).
+#
+# `steps` is the value actually sent upstream, not a hint.
+MODEL_VARIANTS: dict[str, tuple[str, bool, int]] = {
+    # MiniMax-H3 with LoRA acceleration: 4 steps, half the price.
+    "minimax-h3-turbo": ("MINIMAX_H3", True, ACCELERATED_STEPS),
+    # MiniMax-H3 without acceleration: the model's own 20 steps.
+    "minimax-h3": ("MINIMAX_H3", False, MINIMAX_DEFAULT_STEPS),
+}
 
 # OpenAI seconds -> civision `totalSeconds`. The civision page offers 3, 5
 # and 10 seconds; 10 is only available for MiniMax-H3.
@@ -81,13 +108,19 @@ OPENAI_SECONDS_MAP: dict[int, int] = {4: 3, 8: 5, 12: 10}
 CIVISION_SECONDS = (3, 5, 10)
 DEFAULT_SECONDS = 5
 
-# The step count the civision page pins when LoRA acceleration is enabled.
-ACCELERATED_STEPS = 4
-
-# Fallbacks when the alias table has not been seeded yet.
+# The OpenAI-facing names, and what they point at.
+#
+# These are the names a client of the OpenAI API is most likely to send, so
+# they are mapped onto the models this service actually offers:
+#
+#   sora-2      -> minimax-h3-turbo  (MiniMax-H3 with LoRA acceleration)
+#   sora-2-pro  -> minimax-h3        (MiniMax-H3 without acceleration)
+#
+# An alias target is a public model name, not a raw civision value, so that
+# an alias can point at a *variant* of an upstream model.
 DEFAULT_ALIASES: dict[str, str] = {
-    "sora-2": "WAN_VIDEO_2_1_T2V_1_3_B",
-    "sora-2-pro": "MINIMAX_H3",
+    "sora-2": "minimax-h3-turbo",
+    "sora-2-pro": "minimax-h3",
 }
 
 
@@ -113,10 +146,19 @@ class ResolvedModel:
     seconds: tuple[int, ...] = CIVISION_SECONDS
     default_guidance_scale: float = 7.5
     default_steps: int = 50
-    # MiniMax-H3 exposes a "LoRA acceleration" switch that the civision page
-    # turns on by default. It forces numInferenceSteps down to 4 and halves
-    # the magicube cost, so the service must send it to match the page.
-    accelerate_lora: bool = False
+    # MiniMax-H3 exposes a "LoRA acceleration" switch on the civision page.
+    # On, it forces numInferenceSteps down to 4 and halves the magicube cost.
+    # The two settings give different results, so they are two model names:
+    # `minimax-h3-turbo` (on) and `minimax-h3` (off).
+    #
+    # None means "do not send a videoInferenceArgs block at all": the other
+    # models reject it outright with "videoInferenceArgs 仅支持 MiniMax-H3".
+    # True and False are sent explicitly, which is what the page does when
+    # the switch is on and when it is off.
+    accelerate_lora: bool | None = None
+    # True when the caller named a variant of the upstream model rather than
+    # the model itself. The two MiniMax-H3 names are both variants.
+    is_variant: bool = False
 
     @property
     def supports_image_input(self) -> bool:
@@ -213,27 +255,41 @@ def _extract_sizes(
 def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[ResolvedModel]:
     """Turn the upstream model list into resolved models.
 
-    `aliases` maps an OpenAI-facing name onto a civision value.
+    `aliases` maps an OpenAI-facing name onto another public model name (or
+    a raw civision value, for entries stored in the database).
     """
     by_value = {m.get("value"): m for m in catalog if m.get("value")}
 
-    def make(requested: str, target: dict) -> ResolvedModel:
+    def make(
+        requested: str,
+        target: dict,
+        *,
+        accelerate: bool | None = None,
+        steps: int | None = None,
+        is_variant: bool = False,
+    ) -> ResolvedModel:
         support = set(target.get("supportType") or [])
         sizes, tiers, aspects = _extract_sizes(target)
         dp = (target.get("defaultParams") or {}).get("basicDiffusionArgs") or {}
         value = target.get("value", "")
         # MiniMax-H3 is the only model that offers the 10 second duration.
         seconds = CIVISION_SECONDS
-        accelerate = False
-        steps = int(dp.get("numInferenceSteps") or 50)
+        model_steps = int(dp.get("numInferenceSteps") or 50)
         if value.upper() == "MINIMAX_H3":
             seconds = CIVISION_SECONDS
-            # The civision page turns LoRA acceleration on by default for this
-            # model, which pins numInferenceSteps to 4 and halves the cost.
-            accelerate = True
-            steps = ACCELERATED_STEPS
+            # Without an explicit setting, the civision page turns LoRA
+            # acceleration on for this model, which pins numInferenceSteps
+            # to 4 and halves the cost.
+            model_steps = ACCELERATED_STEPS
+            if accelerate is None:
+                accelerate = True
         else:
             seconds = tuple(s for s in CIVISION_SECONDS if s != 10)
+            # The other models reject a videoInferenceArgs block outright.
+            accelerate = None
+        if steps is not None:
+            model_steps = steps
+
         return ResolvedModel(
             requested=requested,
             civision_value=value,
@@ -249,22 +305,60 @@ def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[Resolved
             default_height=int(dp.get("height") or (sizes[-1][1] if sizes else 1280)),
             seconds=seconds,
             default_guidance_scale=float(dp.get("guidanceScale") or 7.5),
-            default_steps=steps,
+            default_steps=model_steps,
             accelerate_lora=accelerate,
+            is_variant=is_variant,
         )
 
     resolved: list[ResolvedModel] = []
+
+    # A model with declared variants is exposed *as* those variants, not
+    # under its own name, so that "minimax-h3" means exactly one thing.
+    variant_targets: set[str] = {
+        value for value, _, _ in MODEL_VARIANTS.values()
+    }
+
     for m in catalog:
         value = m.get("value")
         if not value or value not in ALLOWED_MODELS:
             continue
+        if value in variant_targets:
+            continue  # built below, one entry per variant
         resolved.append(make(normalize_model_name(value), m))
 
-    for alias, target_value in aliases.items():
-        target_model = by_value.get(target_value)
-        if not target_model or target_value not in ALLOWED_MODELS:
+    for public_name, (value, accelerate, steps) in MODEL_VARIANTS.items():
+        target = by_value.get(value)
+        if not target or value not in ALLOWED_MODELS:
             continue
-        resolved.append(make(alias, target_model))
+        resolved.append(
+            make(
+                public_name,
+                target,
+                accelerate=accelerate,
+                steps=steps,
+                is_variant=True,
+            )
+        )
+
+    by_public_name = {m.requested: m for m in resolved}
+    for alias, target_name in aliases.items():
+        target_model = by_public_name.get(target_name)
+        if target_model is None:
+            # An alias stored in the database may point at a raw civision
+            # value instead of a public name.
+            raw = by_value.get(target_name)
+            if not raw or target_name not in ALLOWED_MODELS:
+                continue
+            target_model = make(normalize_model_name(target_name), raw)
+        resolved.append(
+            make(
+                alias,
+                by_value[target_model.civision_value],
+                accelerate=target_model.accelerate_lora,
+                steps=target_model.default_steps,
+                is_variant=target_model.is_variant,
+            )
+        )
     return resolved
 
 

@@ -319,7 +319,7 @@ async def _run_with_account(
                 prompt=spec.prompt,
                 guidance_scale=spec.guidance_scale,
                 num_inference_steps=spec.num_inference_steps,
-                accelerate_lora=model.accelerate_lora or None,
+                accelerate_lora=model.accelerate_lora,
                 image_input=image_input,
                 image_input_end=image_input_end,
             )
@@ -352,7 +352,7 @@ async def _run_with_account(
             predict_type=predict_type,
             image_input=image_input,
             image_input_end=image_input_end,
-            accelerate_lora=model.accelerate_lora or None,
+            accelerate_lora=model.accelerate_lora,
         )
 
         async with session_scope() as session:
