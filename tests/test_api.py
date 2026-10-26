@@ -7,6 +7,7 @@ stubbed out, so no magicubes are spent.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -159,6 +160,102 @@ class TestVideoCreation:
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "queued"
+
+    def test_a_bare_image_string_is_stored_on_the_job(self, client, monkeypatch):
+        # new-api's OpenAI video channel declares input_reference as a string
+        # and forwards that string. The object form above must keep working too.
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["url"] = job.input_reference_url
+            seen["seconds"] = job.seconds
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={
+                "model": "wan2.1-i2v-14b",
+                "prompt": "a bird",
+                "seconds": 4,
+                "size": "720x1280",
+                "input_reference": "data:image/png;base64,aaaa",
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "queued"
+        assert seen["url"] == "data:image/png;base64,aaaa"
+        assert seen["seconds"] == "3"
+
+    def test_new_api_image_aliases_fill_the_two_frames(self, client, monkeypatch):
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["start"] = job.input_reference_url
+            seen["end"] = job.input_reference_end_url
+            seen["seconds"] = job.seconds
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={
+                "model": "minimax-h3",
+                "prompt": "a bird",
+                "duration": 8,
+                "image": "https://example.com/a.png",
+                "images": ["https://example.com/b.png"],
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert seen == {
+            "start": "https://example.com/a.png",
+            "end": "https://example.com/b.png",
+            "seconds": "5",
+        }
+
+    def test_n8n_multipart_reference_is_stored_for_the_worker(self, client, monkeypatch):
+        # n8n's OpenAI video node posts multipart/form-data, and new-api's
+        # OpenAI video channel forwards that body, file part included.
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["url"] = job.input_reference_url
+            seen["seconds"] = job.seconds
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers={"Authorization": "Bearer sk-civ-test"},
+            data={
+                "model": "wan2.1-i2v-14b",
+                "prompt": "a bird",
+                "seconds": "4",
+                "size": "1280x720",
+            },
+            files={"input_reference": ("cat.png", b"\x89PNG-fake", "image/png")},
+        )
+        assert r.status_code == 200, r.text
+        assert seen["seconds"] == "3"
+        stored = Path(seen["url"])
+        assert stored.read_bytes() == b"\x89PNG-fake"
+        stored.unlink()
+
+    def test_a_bad_end_frame_names_the_end_frame(self, client):
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={
+                "model": "minimax-h3",
+                "prompt": "a bird",
+                "input_reference": "https://example.com/a.png",
+                "input_reference_end": 12,
+            },
+        )
+        assert r.status_code == 400
+        error = r.json()["error"]
+        assert error["param"] == "input_reference_end"
+        assert "input_reference_end" in error["message"]
 
     def test_two_images_are_rejected_for_a_model_without_flf(self, client):
         r = client.post(

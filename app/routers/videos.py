@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Form, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,13 +45,59 @@ public_router = APIRouter()
 )
 async def create_video(
     request: Request,
-    body: CreateVideoRequest,
     session: AsyncSession = Depends(get_session),
+    model: str | None = Form(None),
+    prompt: str | None = Form(None),
+    seconds: str | None = Form(None),
+    size: str | None = Form(None),
+    image: str | None = Form(None),
+    duration: str | None = Form(None),
+    negative_prompt: str | None = Form(None),
+    guidance_scale: float | None = Form(None),
+    num_inference_steps: int | None = Form(None),
 ) -> VideoResource:
     """Create a video generation job.
 
     Returns immediately with `status: queued`; the worker picks it up.
+
+    JSON is what OpenAI documents and what a client sends directly. n8n's
+    video node sends `multipart/form-data` instead, with the reference image
+    as a file part named `input_reference`, and new-api's OpenAI video channel
+    forwards that body unchanged.
     """
+    content_type = request.headers.get("content-type", "")
+    uploads: dict[str, UploadFile] = {}
+    if content_type.startswith("application/json") or not content_type:
+        raw = await request.json()
+        if not isinstance(raw, dict):
+            raise openai_error(400, "request body must be an object", "invalid_request_error")
+        body = _parse_create_body(raw)
+    else:
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "seconds": seconds,
+            "size": size,
+            "duration": duration,
+            "image": image,
+            "negative_prompt": negative_prompt,
+            "guidance_scale": guidance_scale,
+            "num_inference_steps": num_inference_steps,
+        }
+        # A form field and a file can share the name `input_reference`. The file
+        # is the image n8n uploaded; the field, when it is text, is a URL.
+        # Reading the file parts from the parsed form avoids FastAPI also
+        # binding that same part to the string parameter above.
+        form = await request.form()
+        uploads = _reference_uploads(form)
+        for name in ("input_reference", "input_reference_end"):
+            if name in uploads:
+                continue
+            value = form.get(name)
+            if isinstance(value, str) and value.strip():
+                payload[name] = value
+        body = _parse_create_body({key: value for key, value in payload.items() if value is not None})
+
     catalog = await catalog_service.get(session)
 
     model = catalog.resolve(body.model)
@@ -68,7 +116,9 @@ async def create_video(
     except ValueError as exc:
         raise openai_error(400, str(exc), "invalid_request_error") from exc
 
-    if body.input_reference_end is not None:
+    has_start = body.input_reference is not None or "input_reference" in uploads
+    has_end = body.input_reference_end is not None or "input_reference_end" in uploads
+    if has_end:
         if not model.supports_flf2video:
             raise openai_error(
                 400,
@@ -77,14 +127,14 @@ async def create_video(
                 "invalid_request_error",
                 param="input_reference_end",
             )
-        if body.input_reference is None:
+        if not has_start:
             raise openai_error(
                 400,
                 "input_reference_end needs a first frame; pass input_reference too",
                 "invalid_request_error",
                 param="input_reference",
             )
-    elif body.input_reference is not None:
+    elif has_start:
         if not model.supports_image_input:
             raise openai_error(
                 400,
@@ -125,11 +175,63 @@ async def create_video(
         job.input_reference_url = body.input_reference.image_url
     if body.input_reference_end and body.input_reference_end.image_url:
         job.input_reference_end_url = body.input_reference_end.image_url
+    if "input_reference" in uploads:
+        job.input_reference_url = await _store_reference(
+            uploads["input_reference"], settings=get_settings(), job_id=job_id, slot="start"
+        )
+    if "input_reference_end" in uploads:
+        job.input_reference_end_url = await _store_reference(
+            uploads["input_reference_end"], settings=get_settings(), job_id=job_id, slot="end"
+        )
 
     session.add(job)
     await session.flush()
     await enqueue_job(session, job)
     return job_to_resource(job)
+
+
+def _reference_uploads(form) -> dict[str, Any]:
+    # A file part exposes `filename`; a text part is a plain string. Checking
+    # the attribute rather than the class avoids matching the wrong copy of
+    # Starlette's UploadFile when the process imported it twice.
+    found: dict[str, Any] = {}
+    for name in ("input_reference", "input_reference_end"):
+        value = form.get(name)
+        if getattr(value, "filename", None):
+            found[name] = value
+    return found
+
+
+def _parse_create_body(payload: dict[str, Any]) -> CreateVideoRequest:
+    try:
+        return CreateVideoRequest.model_validate(payload)
+    except ValidationError as exc:
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = [str(part) for part in first.get("loc", [])]
+        raise openai_error(
+            400,
+            str(first.get("msg", "invalid request")),
+            "invalid_request_error",
+            param=".".join(loc) or None,
+        ) from exc
+
+
+async def _store_reference(upload: UploadFile, *, settings, job_id: str, slot: str) -> str:
+    """Keep an uploaded reference image where the worker can read it.
+
+    The worker treats a non-URL value as a local path and uploads those bytes
+    to ModelScope. Writing the file here means a multipart request does not
+    have to be turned into a base64 string first.
+    """
+    name = (upload.filename or "reference.png").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    suffix = name.rsplit(".", 1)[-1].lower() if "." in name else "png"
+    if suffix not in {"png", "jpg", "jpeg", "webp", "gif"}:
+        suffix = "png"
+    relative = f"references/{job_id}-{slot}.{suffix}"
+    path = settings.storage_dir / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(await upload.read())
+    return str(path)
 
 
 @router.get("/videos", response_model=VideoList)
