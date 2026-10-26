@@ -28,6 +28,7 @@ from app.civision.client import (
     CivisionClient,
     CivisionError,
     NotAuthenticated,
+    cookie_values,
 )
 from app.config import get_settings
 
@@ -130,7 +131,7 @@ async def upload_image(
                 )
         finally:
             # The upload endpoints can rotate csrf/token cookies too.
-            for name, value in http.cookies.items():
+            for name, value in cookie_values(http.cookies).items():
                 client.jar[name] = value
 
     return download_url

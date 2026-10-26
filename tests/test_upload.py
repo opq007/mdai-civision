@@ -54,6 +54,22 @@ class FakeClient:
         return FakeResponse(200)
 
 
+def test_duplicate_csrf_cookies_collapse_to_one_value():
+    # ModelScope sets csrf_token for more than one path. httpx rejects reading
+    # that jar by name; the flat session jar must still absorb the latest one.
+    import httpx
+
+    from app.civision.client import cookie_values
+
+    cookies = httpx.Cookies()
+    cookies.set("csrf_token", "old", domain="www.modelscope.ai", path="/")
+    cookies.set("csrf_token", "fresh", domain="www.modelscope.ai", path="/api")
+    with pytest.raises(httpx.CookieConflict):
+        cookies.get("csrf_token")
+
+    assert cookie_values(cookies)["csrf_token"] == "fresh"
+
+
 async def test_upload_keeps_session_cookies_off_the_oss_host(monkeypatch):
     from app.civision import upload as upload_mod
 

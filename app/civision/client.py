@@ -158,6 +158,23 @@ def cookie_header(jar: dict[str, str]) -> str:
     return "; ".join(f"{k}={v}" for k, v in jar.items())
 
 
+def cookie_values(cookies) -> dict[str, str]:
+    """Read a cookie collection into one value per name.
+
+    ModelScope sets `csrf_token` more than once in a single exchange, on
+    different paths or domains. httpx then refuses `cookies.items()` with
+    "Multiple cookies exist with name=csrf_token". The service keeps a flat
+    jar, so the value set last is the one the next request sends.
+    """
+    jar = getattr(cookies, "jar", None)
+    if jar is None:
+        return dict(cookies.items())
+    values: dict[str, str] = {}
+    for cookie in jar:
+        values[cookie.name] = cookie.value
+    return values
+
+
 @dataclass
 class SessionInfo:
     """What we know about a session after probing it."""
@@ -252,7 +269,7 @@ class CivisionClient:
         # ModelScope re-issues csrf_token on almost every response and may
         # rotate other cookies (including m_session_id) at any time. Keep
         # everything it hands back; `save_jar` decides what is persisted.
-        for name, value in r.cookies.items():
+        for name, value in cookie_values(r.cookies).items():
             self.jar[name] = value
 
         return self._unwrap(r)
