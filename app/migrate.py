@@ -13,6 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "accounts": {
         "frozen_balance": "FLOAT DEFAULT 0.0",
+        # Existing rows get 0. An old proxy pin could have been automatic or
+        # manual, and there is no way to tell after the fact, so treat it as
+        # manual: never clear it silently. The account row lets the operator
+        # switch it to direct egress explicitly.
+        "proxy_auto_assigned": "BOOLEAN DEFAULT 0",
+        "user_agent": "VARCHAR(512)",
     },
     "video_jobs": {
         "input_reference_end_url": "TEXT",

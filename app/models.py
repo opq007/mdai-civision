@@ -82,6 +82,11 @@ class Account(Base):
     username: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
 
     proxy_id: Mapped[Optional[int]] = mapped_column(ForeignKey("proxies.id"), nullable=True)
+    # True when the proxy was picked by the pool rather than by the operator.
+    proxy_auto_assigned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The User-Agent of the browser that produced this session. Using a
+    # different one is an identity change upstream can see.
+    user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=1)
 
     total_balance: Mapped[float] = mapped_column(Float, default=0.0)
@@ -99,6 +104,13 @@ class Account(Base):
     created_at: Mapped[dt.datetime] = mapped_column(UtcDateTime, default=utcnow)
 
     proxy: Mapped[Optional[Proxy]] = relationship(back_populates="accounts")
+
+    @property
+    def browser(self) -> str:
+        """Short label for the browser that produced this session."""
+        if self.user_agent and "Firefox" in self.user_agent:
+            return "firefox"
+        return "chrome"
 
 
 class ApiKey(Base):

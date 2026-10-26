@@ -328,6 +328,44 @@ Hard-coding anything in the estimate body (it previously pinned
 `guidance_scale` to 7.5 and `num_inference_steps` to 50) makes the estimate
 describe a different job than the one being submitted.
 
+### Keep the request identity consistent with the browser that made the session
+
+Upstream risk control looks at more than `m_session_id`: the User-Agent,
+anti-bot cookies, and the egress IP are part of the session's identity. A
+session created by Firefox/Camoufox and then used with a Chrome User-Agent
+from a different IP is exactly the kind of change that gets a session
+invalidated quickly.
+
+The service therefore keeps four things aligned:
+
+- `Account.user_agent` stores the User-Agent of the browser that produced
+  the cookies, and `CivisionClient` sends it. The admin form has a
+  Chrome/Edge vs Firefox/Camoufox choice; a custom UA can override it.
+- `save_jar` keeps every cookie the browser or upstream hands back, including
+  the anti-bot ones (`cna`, `ssxmod_itna`, `ssxmod_itna2`, `tfstk`, `isg`,
+  `xsrf`). Do not reintroduce an allowlist; a partial jar is a different
+  client identity.
+- `_request` persists every `Set-Cookie` value, not just `csrf_token`.
+- `AUTO_ASSIGN_PROXY` defaults to `false`, so an imported account keeps the
+  egress IP it was validated from. `TRUST_ENV_PROXY` also defaults to
+  `false`, so a container's `HTTP_PROXY` cannot silently change it.
+
+If you add a browser choice, add its UA to `BROWSER_USER_AGENTS` rather than
+hard-coding a string at the call site.
+
+### Only a confirmed 401 expires an account
+
+`check_session` probes with `GET /api/v1/users/info`. A 401, or the
+business code for "not logged in" (`10010101003`), is the only evidence
+that the cookie is dead. Everything else — 403 (WAF/risk control), 429
+(rate limit), 5xx, non-JSON error pages, and other business errors — is
+marked `transient`, and `validate_account` leaves the account's status
+alone while recording the reason in `last_error`.
+
+This matters because a datacenter IP can be blocked while the session is
+perfectly valid. Before this rule, a WAF 403 looked exactly like an expired
+session.
+
 ### Chromium's cookie store is not durable
 
 It drops `m_session_id` / `h_uid` across restarts. Session state therefore

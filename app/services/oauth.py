@@ -28,7 +28,10 @@ BASE = "https://www.modelscope.ai"
 
 async def build_github_auth_url(callback_url: str) -> str:
     """Ask ModelScope for a GitHub sign-in URL bound to our callback."""
-    async with httpx.AsyncClient(timeout=30.0) as c:
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        trust_env=get_settings().trust_env_proxy,
+    ) as c:
         r = await c.get(
             f"{BASE}/api/v1/auth/login/generate/oauth2/url",
             params={"callback_url": callback_url, "provider": "github"},

@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     account_error_cooldown_s: int = 60
     max_account_retries: int = 3
     default_max_concurrency: int = 1
+    # Keep the egress IP stable. An account imported through a browser was
+    # validated from that browser's IP; silently moving it to a pool proxy
+    # is exactly the kind of identity change upstream risk control reacts to.
+    auto_assign_proxy: bool = False
+    # httpx honours HTTP_PROXY / HTTPS_PROXY / ALL_PROXY by default. A proxy
+    # inherited from the container environment changes the egress IP without
+    # appearing in the account row, so it is opt-in here. This maps to
+    # httpx's `trust_env`, which also lets NETRC / SSL_CERT_FILE override the
+    # client defaults, not just proxies.
+    trust_env_proxy: bool = False
     # Large models at 720p can take a long time upstream (measured: a 14B
     # model at 720x1280 was still running after 25 minutes).
     poll_interval_s: float = 5.0

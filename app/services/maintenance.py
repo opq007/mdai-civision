@@ -62,7 +62,13 @@ class Maintenance:
 
     async def check_sessions(self) -> dict:
         """Validate every account and refresh balances."""
-        summary = {"checked": 0, "ok": 0, "expired": 0, "unreachable": 0}
+        summary = {
+            "checked": 0,
+            "ok": 0,
+            "expired": 0,
+            "unreachable": 0,
+            "transient": 0,
+        }
         async with session_scope() as session:
             accounts = (await session.execute(select(Account))).scalars().all()
             for account in accounts:
@@ -84,6 +90,16 @@ class Maintenance:
                         summary["unreachable"] += 1
                         log.warning(
                             "could not reach ModelScope for %s: %s",
+                            account.name,
+                            info.reason,
+                        )
+                    elif info.transient:
+                        # A rate limit, WAF/403, or another upstream error.
+                        # The cookie may still be valid; keep the account and
+                        # record the reason for the operator.
+                        summary["transient"] += 1
+                        log.warning(
+                            "upstream gave no session verdict for %s: %s",
                             account.name,
                             info.reason,
                         )

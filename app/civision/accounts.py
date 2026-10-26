@@ -10,7 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.civision.client import (
-    KEEP_COOKIES,
     CivisionClient,
     NotAuthenticated,
     SessionInfo,
@@ -30,8 +29,13 @@ def stored_jar(account: Account) -> dict[str, str]:
 
 
 def save_jar(account: Account, jar: dict[str, str]) -> None:
-    keep = {k: v for k, v in jar.items() if k in KEEP_COOKIES}
-    account.cookie_jar = encrypt("; ".join(f"{k}={v}" for k, v in keep.items()))
+    """Persist the whole cookie jar, not a hand-picked subset.
+
+    Upstream risk control sees the anti-bot cookies too; throwing away
+    `cna`/`ssxmod_itna`/`tfstk`/`isg` makes the service look like a different
+    client from the browser that created the session.
+    """
+    account.cookie_jar = encrypt("; ".join(f"{k}={v}" for k, v in jar.items()))
 
 
 def proxy_url(proxy: Optional[Proxy]) -> Optional[str]:
@@ -57,7 +61,11 @@ def proxy_url(proxy: Optional[Proxy]) -> Optional[str]:
 
 
 def client_for(account: Account, proxy: Optional[Proxy] = None) -> CivisionClient:
-    return CivisionClient(jar=stored_jar(account), proxy=proxy_url(proxy))
+    return CivisionClient(
+        jar=stored_jar(account),
+        proxy=proxy_url(proxy),
+        user_agent=account.user_agent,
+    )
 
 
 async def validate_account(
@@ -73,9 +81,10 @@ async def validate_account(
         account.status = "active"
         account.last_error = None
         save_jar(account, info.cookie_jar)
-    elif info.unreachable:
-        # ModelScope could not be reached. The session is not known to be
-        # bad, so leave the account as it is rather than expiring it.
+    elif info.transient:
+        # The probe got no definitive answer: network failure, rate limit,
+        # WAF/403, or another upstream error. None of these prove the
+        # cookie is dead, so leave the account as it is.
         account.last_error = info.reason
     else:
         if account.status != "disabled":
@@ -105,15 +114,18 @@ async def add_account_from_cookies(
     cookie_text: str,
     proxy_id: Optional[int] = None,
     max_concurrency: Optional[int] = None,
+    user_agent: Optional[str] = None,
 ) -> tuple[Optional[Account], SessionInfo]:
     """Create an account from a pasted cookie string.
 
     The cookie is validated against the live site before it is stored, so a
     bad paste fails loudly instead of failing later during a generation.
+    `user_agent` should be the browser that produced the cookies; the service
+    will keep sending it so the request identity stays consistent.
     """
     settings = get_settings()
     proxy = await session.get(Proxy, proxy_id) if proxy_id else None
-    info = await probe_pasted_cookies(cookie_text, proxy_url(proxy))
+    info = await probe_pasted_cookies(cookie_text, proxy_url(proxy), user_agent)
     if not info.authenticated:
         return None, info
 
@@ -123,6 +135,7 @@ async def add_account_from_cookies(
         auth_source="cookie",
         proxy_id=proxy_id,
         max_concurrency=max_concurrency or settings.default_max_concurrency,
+        user_agent=user_agent or None,
     )
     save_jar(account, info.cookie_jar)
     session.add(account)
@@ -138,15 +151,32 @@ async def add_account_from_cookies(
 
 
 async def assign_proxy(session: AsyncSession, account: Account) -> Optional[Proxy]:
-    """Pin the account to a proxy, keeping its egress IP stable.
+    """Resolve the proxy an account should use, keeping its egress stable.
 
-    An account that already has a healthy proxy keeps it. Otherwise we pick
-    the least-loaded healthy proxy from the pool.
+    An account that already has a healthy proxy keeps it. A proxy that was
+    picked automatically is cleared when it becomes unusable, and another one
+    is chosen only when automatic assignment is enabled. A manually pinned
+    proxy is never changed silently: the caller falls back to direct egress
+    for this attempt and the operator can clear it in the admin UI.
     """
     if account.proxy_id:
         current = await session.get(Proxy, account.proxy_id)
         if current and current.enabled and current.healthy:
             return current
+        log.warning(
+            "account %s has an unusable proxy %s",
+            account.id or "new",
+            account.proxy_id,
+        )
+        if not account.proxy_auto_assigned:
+            # The operator pinned this proxy. Do not silently change the
+            # egress IP; leave the pin for them to clear.
+            return None
+        account.proxy_id = None
+        account.proxy_auto_assigned = False
+
+    if not get_settings().auto_assign_proxy:
+        return None
 
     proxies = (
         await session.execute(
@@ -170,6 +200,8 @@ async def assign_proxy(session: AsyncSession, account: Account) -> Optional[Prox
 
     best = min(proxies, key=lambda p: (counts.get(p.id, 0), p.fail_count))
     account.proxy_id = best.id
+    account.proxy_auto_assigned = True
+    log.info("auto-assigned proxy %s to account %s", best.name, account.id or "new")
     return best
 
 

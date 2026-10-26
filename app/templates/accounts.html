@@ -38,13 +38,39 @@
 
         <div class="row">
           <div>
+            <label for="browser">Browser that produced the cookies</label>
+            <select id="browser" name="browser">
+              <option value="chrome" selected>Chrome / Edge</option>
+              <option value="firefox">Firefox / Camoufox</option>
+            </select>
+            <div class="hint">
+              The service keeps sending this browser's User-Agent. A session
+              created by Firefox but used with a Chrome User-Agent is an
+              identity change upstream risk control can see. For Camoufox,
+              choose Firefox; paste its exact UA in the custom field if it
+              differs from the preset.
+            </div>
+          </div>
+          <div>
+            <label for="user_agent">Custom User-Agent (optional)</label>
+            <input id="user_agent" name="user_agent" placeholder="overrides the browser choice">
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
             <label for="proxy_id">Proxy (optional)</label>
             <select id="proxy_id" name="proxy_id">
-              <option value="">— assign automatically —</option>
+              <option value="">— no proxy (direct) —</option>
               {% for p in proxies %}
                 <option value="{{ p.id }}">{{ p.name }}</option>
               {% endfor %}
             </select>
+            <div class="hint">
+              Automatic proxy assignment is off by default. Keeping the
+              import IP avoids changing egress right after the session was
+              created.
+            </div>
           </div>
           <div>
             <label for="max_concurrency">Max concurrent jobs</label>
@@ -62,13 +88,13 @@
       <table>
         <thead>
           <tr><th>Name</th><th>Status</th><th>Balance</th><th>Proxy</th><th>Jobs</th>
-              <th>Source</th><th>Last error</th><th></th></tr>
+              <th>Source</th><th>Browser</th><th>Last error</th><th></th></tr>
         </thead>
         <tbody id="accounts">
         {% for a in accounts %}
           {% include "_account_row.html" %}
         {% else %}
-          <tr><td colspan="8" class="muted">No accounts yet.</td></tr>
+          <tr><td colspan="9" class="muted">No accounts yet.</td></tr>
         {% endfor %}
         </tbody>
       </table>
