@@ -211,7 +211,11 @@ async def retrieve_video_content(
         range_header = request.headers.get("range")
         headers = {"Range": range_header} if range_header else {}
 
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as c:
+        async with httpx.AsyncClient(
+            timeout=120.0,
+            follow_redirects=True,
+            trust_env=settings.trust_env_proxy,
+        ) as c:
             upstream = await c.get(job.upstream_url, headers=headers)
             if upstream.status_code in (200, 206):
                 content = upstream.content

@@ -354,6 +354,7 @@ class TestSessionProbeDistinguishesNetworkFromAuth:
         info = await client.check_session()
         assert info.authenticated is False
         assert info.unreachable is True
+        assert info.transient is True
         assert "cannot reach ModelScope" in info.reason
 
     async def test_a_rejected_session_is_not_flagged_unreachable(self, monkeypatch):
@@ -369,3 +370,160 @@ class TestSessionProbeDistinguishesNetworkFromAuth:
         info = await client.check_session()
         assert info.authenticated is False
         assert info.unreachable is False
+        assert info.transient is False
+
+    async def test_a_rejected_session_reason_includes_the_diagnostic(
+        self, monkeypatch
+    ):
+        from app.civision.client import CivisionClient, NotAuthenticated
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def rejected(self):
+            raise NotAuthenticated(
+                "user not logged in",
+                upstream_code=10010101003,
+                request_id="rid-3",
+            )
+
+        monkeypatch.setattr(CivisionClient, "whoami", rejected)
+
+        info = await client.check_session()
+        assert info.transient is False
+        assert "HTTP 401" in info.reason
+        assert "upstream_code=10010101003" in info.reason
+        assert "request_id=rid-3" in info.reason
+
+    async def test_a_rate_limited_probe_is_transient(self, monkeypatch):
+        from app.civision.client import CivisionClient, RateLimited
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def limited(self):
+            raise RateLimited("Request frequency too fast")
+
+        monkeypatch.setattr(CivisionClient, "whoami", limited)
+
+        info = await client.check_session()
+        assert info.authenticated is False
+        assert info.transient is True
+        assert info.unreachable is False
+        assert "rate limited" in info.reason
+        assert "frequency" in info.reason.lower()
+
+    async def test_a_forbidden_probe_is_transient(self, monkeypatch):
+        from app.civision.client import CivisionClient, Forbidden
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def blocked(self):
+            raise Forbidden("blocked by risk control")
+
+        monkeypatch.setattr(CivisionClient, "whoami", blocked)
+
+        info = await client.check_session()
+        assert info.authenticated is False
+        assert info.transient is True
+        assert info.unreachable is False
+        assert "blocked" in info.reason
+
+    async def test_an_unknown_business_error_is_transient(self, monkeypatch):
+        from app.civision.client import CivisionClient, CivisionError
+
+        client = CivisionClient(jar={"m_session_id": "x", "h_uid": "y"})
+
+        async def broken(self):
+            raise CivisionError("weird upstream state", code="upstream_error", status=400)
+
+        monkeypatch.setattr(CivisionClient, "whoami", broken)
+
+        info = await client.check_session()
+        assert info.authenticated is False
+        assert info.transient is True
+        assert "weird upstream state" in info.reason
+
+
+class TestHttpStatusMapping:
+    """Status codes must be classified before the body is parsed."""
+
+    def test_401_with_an_html_body_is_not_authenticated(self):
+        from app.civision.client import CivisionClient, NotAuthenticated
+
+        response = httpx.Response(401, text="<html>login required</html>")
+        with pytest.raises(NotAuthenticated):
+            CivisionClient._unwrap(response)
+
+    def test_403_with_an_html_body_is_forbidden(self):
+        from app.civision.client import CivisionClient, Forbidden
+
+        response = httpx.Response(403, text="<html>blocked by risk control</html>")
+        with pytest.raises(Forbidden):
+            CivisionClient._unwrap(response)
+
+    def test_429_with_a_json_body_is_rate_limited(self):
+        from app.civision.client import CivisionClient, RateLimited
+
+        response = httpx.Response(429, json={"message": "slow down"})
+        with pytest.raises(RateLimited):
+            CivisionClient._unwrap(response)
+
+    def test_a_frequency_business_error_is_rate_limited(self):
+        from app.civision.client import CivisionClient, RateLimited
+
+        response = httpx.Response(
+            200,
+            json={
+                "success": False,
+                "code": 50001,
+                "message": "Request frequency too fast",
+            },
+        )
+        with pytest.raises(RateLimited):
+            CivisionClient._unwrap(response)
+
+    def test_invalid_authentication_without_success_is_not_authenticated(self):
+        from app.civision.client import CivisionClient, NotAuthenticated
+
+        response = httpx.Response(
+            200,
+            json={"code": "InvalidAuthentication", "message": "user not logged in"},
+        )
+        with pytest.raises(NotAuthenticated) as exc:
+            CivisionClient._unwrap(response)
+        assert exc.value.upstream_code == "InvalidAuthentication"
+        assert "user not logged in" in exc.value.message
+
+    def test_http_errors_carry_status_code_and_request_id(self):
+        from app.civision.client import CivisionClient, Forbidden
+
+        response = httpx.Response(
+            403,
+            json={
+                "code": "AccessDenied",
+                "message": "blocked",
+                "RequestId": "rid-1",
+            },
+        )
+        with pytest.raises(Forbidden) as exc:
+            CivisionClient._unwrap(response)
+        assert exc.value.status == 403
+        assert exc.value.upstream_code == "AccessDenied"
+        assert exc.value.request_id == "rid-1"
+        assert "HTTP 403" in exc.value.diagnostic()
+        assert "request_id=rid-1" in exc.value.diagnostic()
+
+    def test_api_code_failures_carry_the_request_id(self):
+        from app.civision.client import CivisionClient, NotAuthenticated
+
+        response = httpx.Response(
+            200,
+            json={
+                "Code": 10010101003,
+                "Message": "user not logged in",
+                "RequestId": "rid-2",
+            },
+        )
+        with pytest.raises(NotAuthenticated) as exc:
+            CivisionClient._unwrap(response)
+        assert exc.value.upstream_code == 10010101003
+        assert exc.value.request_id == "rid-2"

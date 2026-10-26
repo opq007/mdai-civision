@@ -17,6 +17,7 @@ from app.civision.accounts import (
     refresh_balance,
     validate_account,
 )
+from app.civision.client import user_agent_for
 from app.civision.mapping import DEFAULT_ALIASES
 from app.config import get_settings
 from app.crypto import hash_secret, new_api_key
@@ -29,6 +30,13 @@ from app.services.oauth import build_github_auth_url
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 templates = Jinja2Templates(directory="app/templates")
+
+
+async def _account_row_context(session: AsyncSession, account: Account) -> dict:
+    return {
+        "a": account,
+        "proxies": (await session.execute(select(Proxy))).scalars().all(),
+    }
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -138,17 +146,21 @@ async def add_account_cookies(
     cookies: str = Form(...),
     proxy_id: str = Form(""),
     max_concurrency: int = Form(1),
+    browser: str = Form("chrome"),
+    user_agent: str = Form(""),
     _admin: str = Depends(require_admin),
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     """Add an account by pasting the cookie string from the browser."""
     proxy_id_int = int(proxy_id) if proxy_id.strip().isdigit() else None
+    resolved_user_agent = user_agent.strip() or user_agent_for(browser)
     account, info = await add_account_from_cookies(
         session,
         name=name,
         cookie_text=cookies,
         proxy_id=proxy_id_int,
         max_concurrency=max_concurrency,
+        user_agent=resolved_user_agent,
     )
     if account is None:
         return templates.TemplateResponse(
@@ -208,6 +220,62 @@ async def account_oauth_url(
     )
 
 
+@router.post("/accounts/{account_id}/browser")
+async def set_account_browser(
+    request: Request,
+    account_id: int,
+    browser: str = Form("chrome"),
+    user_agent: str = Form(""),
+    _admin: str = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Record which browser produced the session's cookies."""
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise openai_error(404, "account not found", "invalid_request_error")
+    custom = user_agent.strip()
+    if custom:
+        account.user_agent = custom
+    elif account.browser != browser.strip().lower():
+        # Only replace the UA when the browser choice actually changes;
+        # otherwise pressing "Set" would throw away a custom UA.
+        account.user_agent = user_agent_for(browser)
+    await session.commit()
+    return templates.TemplateResponse(
+        request,
+        "_account_row.html",
+        await _account_row_context(session, account),
+    )
+
+
+@router.post("/accounts/{account_id}/proxy")
+async def set_account_proxy(
+    request: Request,
+    account_id: int,
+    proxy_id: str = Form(""),
+    _admin: str = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    """Pin an account to a proxy, or clear the pin to use direct egress."""
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise openai_error(404, "account not found", "invalid_request_error")
+    if proxy_id.strip().isdigit():
+        proxy = await session.get(Proxy, int(proxy_id))
+        if proxy is None:
+            raise openai_error(404, "proxy not found", "invalid_request_error")
+        account.proxy_id = proxy.id
+    else:
+        account.proxy_id = None
+    account.proxy_auto_assigned = False
+    await session.commit()
+    return templates.TemplateResponse(
+        request,
+        "_account_row.html",
+        await _account_row_context(session, account),
+    )
+
+
 @router.post("/accounts/{account_id}/validate")
 async def validate_account_route(
     request: Request,
@@ -225,7 +293,7 @@ async def validate_account_route(
     return templates.TemplateResponse(
         request,
         "_account_row.html",
-        {"a": account, "proxies": (await session.execute(select(Proxy))).scalars().all()},
+        await _account_row_context(session, account),
     )
 
 
@@ -244,7 +312,7 @@ async def toggle_account(
     return templates.TemplateResponse(
         request,
         "_account_row.html",
-        {"a": account, "proxies": (await session.execute(select(Proxy))).scalars().all()},
+        await _account_row_context(session, account),
     )
 
 

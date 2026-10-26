@@ -26,55 +26,104 @@ BASE = get_settings().civision_base
 # Cookies that must be present for the session to be considered logged in.
 SESSION_COOKIES = ("m_session_id", "h_uid")
 
-# Cookies worth keeping when persisting a session.
-KEEP_COOKIES = (
-    "m_session_id",
-    "h_uid",
-    "csrf_session",
-    "csrf_token",
-    "acw_tc",
-    "auth_sid",
-)
+# Every cookie the browser (or upstream) hands back is persisted; see
+# `save_jar` in app/civision/accounts.py. The anti-bot cookies matter as much
+# as the login ones, because dropping them makes the service's requests look
+# different from the browser that created the session.
 
-USER_AGENT = (
+CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+FIREFOX_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) "
+    "Gecko/20100101 Firefox/135.0"
+)
+
+# Kept for callers that only need the default browser.
+USER_AGENT = CHROME_USER_AGENT
+
+BROWSER_USER_AGENTS = {
+    "chrome": CHROME_USER_AGENT,
+    "firefox": FIREFOX_USER_AGENT,
+}
+
+
+def user_agent_for(browser: str | None) -> str:
+    """Resolve a browser label (chrome/firefox) to its User-Agent string."""
+    return BROWSER_USER_AGENTS.get((browser or "chrome").strip().lower(), USER_AGENT)
 
 
 class CivisionError(Exception):
     """Base class for upstream failures."""
 
-    def __init__(self, message: str, *, code: str = "internal_error", status: int = 500):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "internal_error",
+        status: int = 500,
+        upstream_code: Any = None,
+        request_id: str | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.code = code
         self.status = status
+        # The upstream's own code/request id, when the body carried them.
+        # They are what makes a WAF 403 distinguishable from a dead session.
+        self.upstream_code = upstream_code
+        self.request_id = request_id
+
+    def diagnostic(self) -> str:
+        """Compact operator-facing description of the upstream failure."""
+        parts = [f"HTTP {self.status}", f"code={self.code}"]
+        if self.upstream_code is not None:
+            parts.append(f"upstream_code={self.upstream_code}")
+        if self.request_id:
+            parts.append(f"request_id={self.request_id}")
+        return " ".join(parts) + f": {self.message}"
 
 
 class NotAuthenticated(CivisionError):
-    def __init__(self, message: str = "not signed in to ModelScope"):
-        super().__init__(message, code="not_authenticated", status=401)
+    def __init__(
+        self,
+        message: str = "not signed in to ModelScope",
+        **kwargs: Any,
+    ):
+        super().__init__(message, code="not_authenticated", status=401, **kwargs)
 
 
 class InsufficientBalance(CivisionError):
-    def __init__(self, message: str = "not enough magicubes"):
-        super().__init__(message, code="insufficient_quota", status=429)
+    def __init__(self, message: str = "not enough magicubes", **kwargs: Any):
+        super().__init__(message, code="insufficient_quota", status=429, **kwargs)
 
 
 class RateLimited(CivisionError):
-    def __init__(self, message: str = "upstream rate limit hit"):
-        super().__init__(message, code="rate_limit_exceeded", status=429)
+    def __init__(self, message: str = "upstream rate limit hit", **kwargs: Any):
+        super().__init__(message, code="rate_limit_exceeded", status=429, **kwargs)
+
+
+class Forbidden(CivisionError):
+    """Upstream refused the request (WAF, risk control, missing permission).
+
+    This is deliberately *not* `NotAuthenticated`: a blocked request does
+    not prove that the cookie session is dead.
+    """
+
+    def __init__(self, message: str = "upstream denied the request", **kwargs: Any):
+        super().__init__(message, code="forbidden", status=403, **kwargs)
 
 
 class InvalidRequest(CivisionError):
-    def __init__(self, message: str):
-        super().__init__(message, code="invalid_request_error", status=400)
+    def __init__(self, message: str, **kwargs: Any):
+        super().__init__(message, code="invalid_request_error", status=400, **kwargs)
 
 
 class UpstreamUnavailable(CivisionError):
-    def __init__(self, message: str = "upstream service unavailable"):
-        super().__init__(message, code="server_error", status=503)
+    def __init__(self, message: str = "upstream service unavailable", **kwargs: Any):
+        super().__init__(message, code="server_error", status=503, **kwargs)
 
 
 def parse_cookie_header(raw: str) -> dict[str, str]:
@@ -121,6 +170,11 @@ class SessionInfo:
     # rather than because the session was rejected. A network blip must not
     # mark the account expired.
     unreachable: bool = False
+    # True when the probe got no definitive answer about the session: a
+    # rate limit, a WAF/403 rejection, a malformed upstream response, or any
+    # other business error. None of these prove the cookie is invalid, so
+    # the account must stay in the pool.
+    transient: bool = False
 
 
 class CivisionClient:
@@ -131,27 +185,43 @@ class CivisionClient:
         jar: dict[str, str] | None = None,
         proxy: str | None = None,
         timeout: float | None = None,
+        user_agent: str | None = None,
     ) -> None:
         self.jar: dict[str, str] = dict(jar or {})
         s = get_settings()
         self._proxy = proxy
         self._timeout = timeout or s.civision_timeout_s
+        self._user_agent = user_agent or USER_AGENT
+        self._trust_env = s.trust_env_proxy
+
+    @property
+    def user_agent(self) -> str:
+        return self._user_agent
 
     # -- plumbing ---------------------------------------------------------
 
     def _headers(self, *, json_body: bool = False) -> dict[str, str]:
         h = {
             "accept": "application/json",
+            "accept-language": "en-US,en;q=0.9",
             "referer": f"{BASE}/aigc/videoGeneration",
             "origin": BASE,
-            "user-agent": USER_AGENT,
+            "user-agent": self._user_agent,
             "X-ModelScope-Accept-Language": "en-US",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
         }
         if json_body:
             h["content-type"] = "application/json"
         token = self.jar.get("csrf_token")
         if token:
             h["X-CSRF-TOKEN"] = unquote(token)
+        # The frontend sends the raw `xsrf` cookie, when it exists, in this
+        # header. Mirroring it keeps the request shape the same.
+        xsrf = self.jar.get("xsrf")
+        if xsrf:
+            h["X-XSRF-TOKEN"] = xsrf
         return h
 
     def _client(self) -> httpx.AsyncClient:
@@ -160,6 +230,9 @@ class CivisionClient:
             "cookies": self.jar,
             "timeout": self._timeout,
             "follow_redirects": False,
+            # Do not let a container's HTTP(S)_PROXY silently change the
+            # egress IP; an explicit account proxy is the only proxy used.
+            "trust_env": self._trust_env,
         }
         if self._proxy:
             kwargs["proxy"] = self._proxy
@@ -176,13 +249,11 @@ class CivisionClient:
             except httpx.HTTPError as exc:
                 raise UpstreamUnavailable(f"cannot reach ModelScope: {exc}") from exc
 
-        # ModelScope re-issues csrf_token on every response; keep it fresh.
-        for value in r.cookies.values():
-            if "csrf_token" in r.cookies:
-                self.jar["csrf_token"] = r.cookies["csrf_token"]
-        for name in ("acw_tc", "csrf_session"):
-            if name in r.cookies:
-                self.jar[name] = r.cookies[name]
+        # ModelScope re-issues csrf_token on almost every response and may
+        # rotate other cookies (including m_session_id) at any time. Keep
+        # everything it hands back; `save_jar` decides what is persisted.
+        for name, value in r.cookies.items():
+            self.jar[name] = value
 
         return self._unwrap(r)
 
@@ -190,26 +261,50 @@ class CivisionClient:
     def _unwrap(cls, r: httpx.Response) -> Any:
         """ModelScope often returns HTTP 200 with a failure inside the body.
 
+        Status codes are handled before the body is parsed: a WAF or an
+        error page often returns HTML, and whether a response means "not
+        logged in" must not depend on the body being valid JSON.
+
         Three envelope shapes are in play:
           /api/v1/*       -> {"Code": 200, "Data": {...}, "Success": true}
           /openapi/v1/*   -> {"success": true, "data": {...}}
           legacy          -> {"Code": ..., "Data": {"code": ..., "success": ...}}
         """
+        if r.status_code == 401:
+            message, upstream_code, request_id = cls._error_details(r)
+            raise NotAuthenticated(
+                message,
+                upstream_code=upstream_code,
+                request_id=request_id,
+            )
+        if r.status_code == 403:
+            message, upstream_code, request_id = cls._error_details(r)
+            raise Forbidden(
+                message,
+                upstream_code=upstream_code,
+                request_id=request_id,
+            )
+        if r.status_code == 429:
+            message, upstream_code, request_id = cls._error_details(r)
+            raise RateLimited(
+                message,
+                upstream_code=upstream_code,
+                request_id=request_id,
+            )
+        if r.status_code >= 500:
+            message, upstream_code, request_id = cls._error_details(r)
+            raise UpstreamUnavailable(
+                message,
+                upstream_code=upstream_code,
+                request_id=request_id,
+            )
+
         try:
             body = r.json()
         except (json.JSONDecodeError, ValueError):
-            if r.status_code >= 500:
-                raise UpstreamUnavailable(f"upstream returned {r.status_code}")
             raise CivisionError(
                 f"unexpected upstream response ({r.status_code})", status=502
             )
-
-        if r.status_code == 401:
-            raise NotAuthenticated()
-        if r.status_code == 403:
-            raise CivisionError("upstream denied the request", code="forbidden", status=403)
-        if r.status_code >= 500:
-            raise UpstreamUnavailable(f"upstream returned {r.status_code}")
 
         # openapi envelope
         if isinstance(body, dict) and "success" in body:
@@ -218,6 +313,16 @@ class CivisionClient:
             if "data" in body:
                 return body.get("data")
             return body
+
+        # openapi error envelope without `success`:
+        #   {"code": "InvalidAuthentication", "message": "user not logged in"}
+        if (
+            isinstance(body, dict)
+            and "success" not in body
+            and "code" in body
+            and body.get("code") not in (0, 200, "0", "200", None)
+        ):
+            raise cls._business_error(body)
 
         # api/v1 envelope
         if isinstance(body, dict) and "Code" in body:
@@ -236,24 +341,117 @@ class CivisionClient:
         return body
 
     @staticmethod
+    def _error_details(r: httpx.Response) -> tuple[str, Any, str | None]:
+        """Return (message, upstream_code, request_id) from an error body."""
+        try:
+            body = r.json()
+        except (json.JSONDecodeError, ValueError):
+            text = r.text.strip()
+            return (
+                text[:200] if text else f"upstream returned {r.status_code}",
+                None,
+                None,
+            )
+        if not isinstance(body, dict):
+            return (f"upstream returned {r.status_code}", None, None)
+
+        message = ""
+        for key in ("Message", "message", "msg"):
+            if body.get(key):
+                message = str(body[key])
+                break
+        data = body.get("Data") or body.get("data")
+        if not message and isinstance(data, dict):
+            for key in ("Message", "message"):
+                if data.get(key):
+                    message = str(data[key])
+                    break
+
+        upstream_code = body.get("Code")
+        if upstream_code is None:
+            upstream_code = body.get("code")
+        request_id = (
+            body.get("RequestId")
+            or body.get("requestId")
+            or body.get("request_id")
+            or (
+                data.get("RequestId") or data.get("request_id")
+                if isinstance(data, dict)
+                else None
+            )
+        )
+        return (
+            message or f"upstream returned {r.status_code}",
+            upstream_code,
+            request_id,
+        )
+
+    @staticmethod
     def _business_error(data: dict) -> CivisionError:
         code = data.get("code")
         msg = data.get("message") or "upstream rejected the request"
+        request_id = (
+            data.get("RequestId")
+            or data.get("requestId")
+            or data.get("request_id")
+        )
+        # The openapi envelope uses a string code for auth failures:
+        #   {"code": "InvalidAuthentication", "message": "user not logged in"}
+        if (
+            str(code).lower() == "invalidauthentication"
+            or "not logged in" in str(msg).lower()
+        ):
+            return NotAuthenticated(
+                str(msg), upstream_code=code, request_id=request_id
+            )
         if code == 50001 or "frequency" in str(msg).lower():
-            return RateLimited(str(msg))
+            return RateLimited(
+                str(msg), upstream_code=code, request_id=request_id
+            )
         if code == 99999:
-            return InvalidRequest(str(msg))
+            return InvalidRequest(
+                str(msg), upstream_code=code, request_id=request_id
+            )
         if code == 40000:
-            return InvalidRequest(str(msg))
-        return CivisionError(str(msg), code="upstream_error", status=400)
+            return InvalidRequest(
+                str(msg), upstream_code=code, request_id=request_id
+            )
+        return CivisionError(
+            str(msg),
+            code="upstream_error",
+            status=400,
+            upstream_code=code,
+            request_id=request_id,
+        )
 
     @staticmethod
     def _map_api_code(code: Any, msg: str, body: dict) -> CivisionError:
+        data = body.get("Data")
+        request_id = (
+            body.get("RequestId")
+            or body.get("requestId")
+            or body.get("request_id")
+            or (
+                data.get("RequestId") or data.get("request_id")
+                if isinstance(data, dict)
+                else None
+            )
+        )
         if code == 10010101003:
-            raise NotAuthenticated(msg)
+            raise NotAuthenticated(
+                msg, upstream_code=code, request_id=request_id
+            )
         if code == 10019901001:
-            raise CivisionError(msg, code="forbidden", status=403)
-        return CivisionError(msg, code="upstream_error", status=400)
+            raise Forbidden(
+                msg, upstream_code=code, request_id=request_id
+            )
+        return CivisionError(
+            msg,
+            code="upstream_error",
+            status=400,
+            upstream_code=code,
+            request_id=request_id,
+        )
 
     # -- endpoints --------------------------------------------------------
 
@@ -273,9 +471,12 @@ class CivisionClient:
             )
         try:
             info = await self.whoami()
-        except NotAuthenticated:
+        except NotAuthenticated as exc:
+            # The only definitive answer that the session is dead.
             return SessionInfo(
-                authenticated=False, cookie_jar=jar, reason="ModelScope rejected the session"
+                authenticated=False,
+                cookie_jar=jar,
+                reason=f"ModelScope rejected the session ({exc.diagnostic()})",
             )
         except UpstreamUnavailable as exc:
             # The network is down, not the session. Reporting this as
@@ -284,12 +485,34 @@ class CivisionClient:
             return SessionInfo(
                 authenticated=False,
                 cookie_jar=jar,
-                reason=f"could not reach ModelScope: {exc.message}",
+                reason=f"could not reach ModelScope ({exc.diagnostic()})",
                 unreachable=True,
+                transient=True,
+            )
+        except RateLimited as exc:
+            return SessionInfo(
+                authenticated=False,
+                cookie_jar=jar,
+                reason=f"upstream rate limited the probe ({exc.diagnostic()})",
+                transient=True,
+            )
+        except Forbidden as exc:
+            return SessionInfo(
+                authenticated=False,
+                cookie_jar=jar,
+                reason=f"upstream blocked the probe ({exc.diagnostic()})",
+                transient=True,
             )
         except CivisionError as exc:
+            # Any other upstream rejection (business error, malformed
+            # response, invalid request) is not proof that the cookie is
+            # invalid. Keep the account in the pool and let the next probe
+            # decide.
             return SessionInfo(
-                authenticated=False, cookie_jar=jar, reason=exc.message
+                authenticated=False,
+                cookie_jar=jar,
+                reason=f"probe failed ({exc.diagnostic()})",
+                transient=True,
             )
         data = info.get("Data", info) if isinstance(info, dict) else {}
         username = (
@@ -479,11 +702,14 @@ class CivisionClient:
         return ""
 
 
-async def probe_pasted_cookies(raw: str, proxy: str | None = None) -> SessionInfo:
+async def probe_pasted_cookies(
+    raw: str, proxy: str | None = None, user_agent: str | None = None
+) -> SessionInfo:
     """Validate a pasted cookie string without needing an account object.
 
     Used by the admin UI so the operator gets a precise reason when a paste
-    does not work.
+    does not work. `user_agent` should match the browser the cookies came
+    from, so the probe sees the same identity upstream will see later.
     """
     jar = parse_cookie_header(raw)
     if not jar:
@@ -501,5 +727,5 @@ async def probe_pasted_cookies(raw: str, proxy: str | None = None) -> SessionInf
             ),
         )
 
-    client = CivisionClient(jar=jar, proxy=proxy)
+    client = CivisionClient(jar=jar, proxy=proxy, user_agent=user_agent)
     return await client.check_session()

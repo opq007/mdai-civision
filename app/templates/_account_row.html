@@ -2,9 +2,32 @@
   <td>{{ a.name }}</td>
   <td><span class="pill {{ a.status }}">{{ a.status }}</span></td>
   <td>{{ a.available_balance|round(0) }}</td>
-  <td>{{ a.proxy.name if a.proxy else '—' }}</td>
+  <td>
+    <form method="post" action="/admin/accounts/{{ a.id }}/proxy"
+          style="display:flex;gap:4px;align-items:center">
+      <select name="proxy_id">
+        <option value="">direct</option>
+        {% for p in proxies %}
+          <option value="{{ p.id }}" {% if a.proxy_id == p.id %}selected{% endif %}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn ghost sm" type="submit">Set</button>
+    </form>
+    {% if a.proxy_auto_assigned %}<span class="muted">(auto)</span>{% endif %}
+  </td>
   <td>{{ a.running_jobs }}/{{ a.max_concurrency }}</td>
   <td class="muted">{{ a.auth_source }}</td>
+  <td>
+    <form method="post" action="/admin/accounts/{{ a.id }}/browser"
+          style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+      <select name="browser">
+        <option value="chrome" {% if a.browser == 'chrome' %}selected{% endif %}>Chrome</option>
+        <option value="firefox" {% if a.browser == 'firefox' %}selected{% endif %}>Firefox</option>
+      </select>
+      <input name="user_agent" placeholder="custom UA" size="12">
+      <button class="btn ghost sm" type="submit">Set</button>
+    </form>
+  </td>
   <td class="muted" style="max-width:260px">{{ a.last_error or '—' }}</td>
   <td style="white-space:nowrap">
     <form method="post" action="/admin/accounts/{{ a.id }}/validate" style="display:inline">

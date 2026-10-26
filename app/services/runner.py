@@ -18,14 +18,16 @@ from typing import Optional
 
 import httpx
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.civision.accounts import (
     assign_proxy,
+    client_for,
     mark_failure,
     mark_success,
     pick_account,
-    proxy_url,
     refresh_balance,
-    stored_jar,
+    save_jar,
 )
 from app.civision.client import (
     CivisionClient,
@@ -135,7 +137,11 @@ async def _resolve_image_url(
 
 
 async def _download(url: str, destination) -> int:
-    async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as c:
+    async with httpx.AsyncClient(
+        timeout=300.0,
+        follow_redirects=True,
+        trust_env=get_settings().trust_env_proxy,
+    ) as c:
         async with c.stream("GET", url) as r:
             r.raise_for_status()
             total = 0
@@ -279,6 +285,18 @@ async def _handle_account_error(account: Account, exc: Exception) -> None:
             await send_alert(f"Account '{real.name}' ran out of magicubes")
 
 
+async def _finish_account_job(
+    session: AsyncSession, account_id: int, client: CivisionClient
+) -> None:
+    """Persist cookies rotated by submit/poll and release the job slot."""
+    real = await session.get(Account, account_id)
+    if real is None:
+        return
+    save_jar(real, client.jar)
+    if real.running_jobs > 0:
+        real.running_jobs -= 1
+
+
 async def _run_with_account(
     job_id: str,
     spec: JobSpec,
@@ -297,11 +315,9 @@ async def _run_with_account(
         last_used = real.last_used_at
         real.last_used_at = utcnow()
         await session.flush()
-        jar = stored_jar(real)
+        client = client_for(real, proxy)
 
     try:
-        client = CivisionClient(jar=jar, proxy=proxy_url(proxy))
-
         image_input = None
         image_input_end = None
         if spec.input_reference_url:
@@ -386,9 +402,7 @@ async def _run_with_account(
         log.info("job %s completed", job_id)
     finally:
         async with session_scope() as session:
-            real = await session.get(Account, account.id)
-            if real and real.running_jobs > 0:
-                real.running_jobs -= 1
+            await _finish_account_job(session, account.id, client)
 
 
 async def _resume_task(job_id: str, task_id: str) -> bool:
@@ -401,16 +415,15 @@ async def _resume_task(job_id: str, task_id: str) -> bool:
     if account is None:
         return False
 
-    proxy = None
     async with session_scope() as session:
         real = await session.get(Account, account.id)
         if real is None:
             return False
         proxy = await assign_proxy(session, real)
+        client = client_for(real, proxy)
         real.running_jobs += 1
 
     try:
-        client = CivisionClient(jar=stored_jar(account), proxy=proxy_url(proxy))
         upstream_url = await _poll_until_settled(job_id, client, task_id)
         if upstream_url:
             await _store_result(job_id, upstream_url)
@@ -427,9 +440,7 @@ async def _resume_task(job_id: str, task_id: str) -> bool:
         return False
     finally:
         async with session_scope() as session:
-            real = await session.get(Account, account.id)
-            if real and real.running_jobs > 0:
-                real.running_jobs -= 1
+            await _finish_account_job(session, account.id, client)
 
 
 async def _store_result(job_id: str, upstream_url: str) -> None:
