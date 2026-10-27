@@ -30,6 +30,16 @@ class Settings(BaseSettings):
 
     # --- account behaviour ------------------------------------------------
     session_check_interval_s: int = 900
+    # The daily magicube grant is credited by reading /api/v1/users/login/info,
+    # and a second read the same day does nothing. Checking far more often than
+    # once a day only makes the traffic look mechanical, so the loop wakes
+    # hourly and skips any account touched within this window.
+    daily_grant_min_interval_s: int = 12 * 60 * 60
+    # Beijing-time window the grant may be claimed in. Upstream does not care
+    # when the read happens, but a request at 03:00 looks nothing like someone
+    # opening the site, so claims stay inside daytime hours.
+    daily_grant_window_start_hour: int = 8
+    daily_grant_window_end_hour: int = 21
     session_validate_before_use: bool = True
     submit_cooldown_s: int = 45
     account_error_cooldown_s: int = 60

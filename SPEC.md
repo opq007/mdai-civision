@@ -190,6 +190,21 @@ Wan2.2 T2V-A14B、Wan2.2 I2V-A14B）不对外暴露。
 | 消费费率 | `GET` | `/openapi/v1/magicubes/spend/rates` |
 | 交易流水 | `GET` | `/openapi/v1/magicubes/transactions?type=&category_key=&page=&page_size=` |
 | 赚取规则 | `GET` | `/openapi/v1/magicubes/earn/rules` |
+| 每日发放 | `GET` | `/api/v1/users/login/info`（见下方说明） |
+
+**每日 200 魔粒不是登录接口发的，也没有领取按钮。** 规则接口里
+`daily_active`（「注册并登陆」，`category_key=daily`，`amount=200`，
+`expire_days=1`，`daily_cap=1`）的入账是 `GET /api/v1/users/login/info`
+的副作用：一个**已经登录**的浏览器打开任意页面就会打这个请求，服务端
+据此把当天的短期魔粒入账。实测：余额 100，`/api/v1/users/info` 之后仍是
+100，紧接着的 `/api/v1/users/login/info` 之后变成 300；流水新增一条
+`EARN` / `rule_key=daily_active` / `total_amount=200`，`expire_at` 约为
+24 小时后。同一天再请求一次余额不变，`today_remain` 变为 0。
+
+所以这个请求**不是会话探活**。探活继续用 `/api/v1/users/info`，它不发放
+任何东西；发放由单独的巡检来做，每天最多一次，且只在北京时间
+08:00–21:00 之间。绑定阿里云的额外 50 魔粒是另一条规则
+（`aliyun_bindlogin`），这个请求不会发放它。
 
 **实测费率表**（共 14 条，与视频相关的只有一条）：
 
