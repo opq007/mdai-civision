@@ -3,22 +3,66 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import random
 from pathlib import Path
 
 from sqlalchemy import select
 
 from app.civision.accounts import (
+    client_for,
     refresh_balance,
+    save_jar,
     validate_account,
 )
+from app.civision.client import CivisionError
 from app.config import get_settings
 from app.db import session_scope
-from app.models import Account, VideoJob, utcnow
+from app.models import Account, Proxy, VideoJob, utcnow
 from app.services.alerts import send_alert
 from app.services.metrics import active_accounts_gauge
 
 log = logging.getLogger(__name__)
+
+# ModelScope stamps the daily grant in Beijing time: a grant claimed at 08:00
+# expires 24 hours later, so "today" for the grant is the Beijing day.
+BEIJING = dt.timezone(dt.timedelta(hours=8))
+
+# How often the loop wakes to see whether anyone is due. The real limit is
+# the per-account interval below; this only bounds how late a claim can be.
+DAILY_GRANT_TICK_S = 60 * 60
+
+
+def grant_due(
+    now: dt.datetime,
+    last_grant_at: dt.datetime | None,
+    *,
+    min_interval_s: int,
+    window_start_hour: int,
+    window_end_hour: int,
+    account_id: int = 0,
+) -> bool:
+    """Whether an account should claim its daily grant right now.
+
+    Two guards, both there to keep the traffic from looking scheduled:
+
+    - at most once per ``min_interval_s``, so a restart cannot fire it twice
+    - only inside the Beijing-time window, and not before an offset derived
+      from the account id, so accounts do not all claim at the opening minute
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    if last_grant_at is not None:
+        if last_grant_at.tzinfo is None:
+            last_grant_at = last_grant_at.replace(tzinfo=dt.timezone.utc)
+        if (now - last_grant_at).total_seconds() < min_interval_s:
+            return False
+    local = now.astimezone(BEIJING)
+    if not window_start_hour <= local.hour < window_end_hour:
+        return False
+    earliest = window_start_hour * 60 + (account_id * 47) % 150
+    return local.hour * 60 + local.minute >= earliest
 
 
 class Maintenance:
@@ -31,6 +75,7 @@ class Maintenance:
         self._tasks = [
             asyncio.create_task(self._session_loop()),
             asyncio.create_task(self._cleanup_loop()),
+            asyncio.create_task(self._daily_grant_loop()),
         ]
         log.info("maintenance started")
 
@@ -49,6 +94,75 @@ class Maintenance:
                 return
             except Exception:  # noqa: BLE001
                 log.exception("session check failed")
+
+    async def _daily_grant_loop(self) -> None:
+        """Claim the daily magicube grant, at most once per account per window.
+
+        The grant is a side effect of reading /api/v1/users/login/info, which is
+        what the site does when an already-signed-in browser opens a page. The
+        session probe does not do this, so without this loop the grant is never
+        collected. A short random delay on startup keeps a restart from claiming
+        at a predictable instant.
+        """
+        await asyncio.sleep(random.uniform(30, 300))
+        while True:
+            try:
+                await self.claim_daily_grants()
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001
+                log.exception("daily grant check failed")
+            try:
+                await asyncio.sleep(DAILY_GRANT_TICK_S)
+            except asyncio.CancelledError:
+                return
+
+    async def claim_daily_grants(self, *, now: dt.datetime | None = None) -> dict:
+        """Claim the day's grant for every account that is due for it."""
+        settings = get_settings()
+        now = now or utcnow()
+        summary = {"checked": 0, "claimed": 0, "skipped": 0, "failed": 0}
+        async with session_scope() as session:
+            accounts = (await session.execute(select(Account))).scalars().all()
+            for account in accounts:
+                if account.status != "active":
+                    continue
+                if not grant_due(
+                    now,
+                    account.daily_grant_at,
+                    min_interval_s=settings.daily_grant_min_interval_s,
+                    window_start_hour=settings.daily_grant_window_start_hour,
+                    window_end_hour=settings.daily_grant_window_end_hour,
+                    account_id=account.id or 0,
+                ):
+                    summary["skipped"] += 1
+                    continue
+                summary["checked"] += 1
+                # Spread the accounts out instead of requesting them back to back.
+                await asyncio.sleep(random.uniform(5, 40))
+                try:
+                    await self._claim_one(session, account)
+                    summary["claimed"] += 1
+                except CivisionError as exc:
+                    # A failed read grants nothing, so leave daily_grant_at alone
+                    # and let the next wake try again. It is not evidence that
+                    # the session is dead; the session loop decides that.
+                    summary["failed"] += 1
+                    log.warning(
+                        "daily grant failed for %s: %s", account.name, exc.diagnostic()
+                    )
+        return summary
+
+    async def _claim_one(self, session, account: Account) -> None:
+        proxy = await session.get(Proxy, account.proxy_id) if account.proxy_id else None
+        client = client_for(account, proxy)
+        await client.touch_login()
+        account.daily_grant_at = utcnow()
+        save_jar(account, client.jar)
+        try:
+            await refresh_balance(session, account, proxy=proxy)
+        except CivisionError:
+            log.warning("balance refresh after daily grant failed for %s", account.name)
 
     async def _cleanup_loop(self) -> None:
         while True:

@@ -7,6 +7,8 @@ those signals aligned. Nothing here reaches the network.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -240,6 +242,107 @@ class TestValidateAccount:
         assert info.transient is False
         assert account.status == "expired"
         assert account.last_error == "ModelScope rejected the session"
+
+
+class TestDailyGrant:
+    def test_window_and_interval(self):
+        from app.services.maintenance import BEIJING, grant_due
+
+        def at(hour, minute=0):
+            return dt.datetime(2026, 10, 27, hour, minute, tzinfo=BEIJING)
+
+        kwargs = dict(
+            min_interval_s=12 * 60 * 60,
+            window_start_hour=8,
+            window_end_hour=21,
+            account_id=1,
+        )
+        # Account 1's offset is 47 minutes, so 08:30 is still too early.
+        assert grant_due(at(8, 30), None, **kwargs) is False
+        assert grant_due(at(9, 0), None, **kwargs) is True
+        # Never overnight, and not twice inside the interval.
+        assert grant_due(at(3, 0), None, **kwargs) is False
+        assert grant_due(at(22, 0), None, **kwargs) is False
+        assert grant_due(at(15, 0), at(9, 0), **kwargs) is False
+        assert grant_due(at(15, 0), at(2, 0), **kwargs) is True
+
+    async def test_claims_once_and_records_it(self, monkeypatch, db_session):
+        from contextlib import asynccontextmanager
+
+        from app.services import maintenance as maint_mod
+
+        calls = {"touch": 0}
+
+        class FakeClient:
+            jar = {"m_session_id": "s", "h_uid": "u"}
+
+            async def touch_login(self):
+                calls["touch"] += 1
+                return {}
+
+        @asynccontextmanager
+        async def fake_scope():
+            yield db_session
+
+        async def fake_refresh(session, account, proxy=None):
+            account.available_balance = 300
+
+        monkeypatch.setattr(maint_mod, "session_scope", fake_scope)
+        monkeypatch.setattr(maint_mod, "client_for", lambda account, proxy=None: FakeClient())
+        monkeypatch.setattr(maint_mod, "refresh_balance", fake_refresh)
+        monkeypatch.setattr(maint_mod.asyncio, "sleep", lambda *_a, **_k: _done())
+
+        account = Account(name="a-grant", status="active")
+        db_session.add(account)
+        await db_session.flush()
+
+        now = dt.datetime(2026, 10, 27, 6, 0, tzinfo=dt.timezone.utc)  # 14:00 Beijing
+        summary = await maint_mod.maintenance.claim_daily_grants(now=now)
+
+        assert summary["claimed"] == 1
+        assert calls["touch"] == 1
+        assert account.daily_grant_at is not None
+        assert account.available_balance == 300
+
+        # The same day is not claimed again, however many times the loop wakes.
+        again = await maint_mod.maintenance.claim_daily_grants(now=now)
+        assert again["claimed"] == 0
+        assert calls["touch"] == 1
+
+    async def test_a_failed_claim_is_retried_later(self, monkeypatch, db_session):
+        from contextlib import asynccontextmanager
+
+        from app.civision.client import CivisionError
+        from app.services import maintenance as maint_mod
+
+        class FakeClient:
+            jar = {}
+
+            async def touch_login(self):
+                raise CivisionError("upstream busy", code="upstream_error")
+
+        @asynccontextmanager
+        async def fake_scope():
+            yield db_session
+
+        monkeypatch.setattr(maint_mod, "session_scope", fake_scope)
+        monkeypatch.setattr(maint_mod, "client_for", lambda account, proxy=None: FakeClient())
+        monkeypatch.setattr(maint_mod.asyncio, "sleep", lambda *_a, **_k: _done())
+
+        account = Account(name="a-grant-fail", status="active")
+        db_session.add(account)
+        await db_session.flush()
+
+        now = dt.datetime(2026, 10, 27, 6, 0, tzinfo=dt.timezone.utc)
+        summary = await maint_mod.maintenance.claim_daily_grants(now=now)
+
+        assert summary["failed"] == 1
+        assert account.daily_grant_at is None
+        assert account.status == "active"
+
+
+async def _done():
+    return None
 
 
 class TestMaintenanceClassification:

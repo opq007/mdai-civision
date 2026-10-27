@@ -476,6 +476,16 @@ class CivisionClient:
         """Return the logged-in user's info, or raise NotAuthenticated."""
         return await self._request("GET", "/api/v1/users/info")
 
+    async def touch_login(self) -> dict:
+        """The request the site makes when an already-signed-in browser opens it.
+
+        Upstream treats this read as the day's login and credits the daily
+        magicube grant as a side effect. It does not log anything in, and
+        calling it again the same day does not grant a second time. It is not
+        a session probe: a rejection here says nothing about the cookie.
+        """
+        return await self._request("GET", "/api/v1/users/login/info")
+
     async def check_session(self) -> SessionInfo:
         """Probe whether the current jar is a real, logged-in session."""
         jar = self.jar

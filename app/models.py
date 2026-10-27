@@ -100,6 +100,10 @@ class Account(Base):
     cooldown_until: Mapped[Optional[dt.datetime]] = mapped_column(UtcDateTime)
     last_used_at: Mapped[Optional[dt.datetime]] = mapped_column(UtcDateTime)
     last_validated_at: Mapped[Optional[dt.datetime]] = mapped_column(UtcDateTime)
+    # Last time the daily-login grant was claimed. The grant is credited by
+    # reading /api/v1/users/login/info, at most once a day, and expires the
+    # next day, so this is what keeps the claim from firing on every check.
+    daily_grant_at: Mapped[Optional[dt.datetime]] = mapped_column(UtcDateTime)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(UtcDateTime, default=utcnow)
 

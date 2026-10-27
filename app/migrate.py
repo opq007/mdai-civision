@@ -19,6 +19,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         # switch it to direct egress explicitly.
         "proxy_auto_assigned": "BOOLEAN DEFAULT 0",
         "user_agent": "VARCHAR(512)",
+        "daily_grant_at": "DATETIME",
     },
     "video_jobs": {
         "input_reference_end_url": "TEXT",
