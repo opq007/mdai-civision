@@ -190,6 +190,280 @@ class TestAccountImport:
         assert account.user_agent == "Mozilla/5.0 Firefox/135.0"
 
 
+class TestProxyFor:
+    """Proxy construction for HTTP and SOCKS5, including credentials."""
+
+    def _proxy(self, url: str, username: str | None = None, password: str | None = None):
+        from app.crypto import encrypt
+
+        return Proxy(
+            name="p",
+            url=url,
+            username=username,
+            password=encrypt(password) if password else None,
+        )
+
+    def test_the_socks_extra_is_a_declared_dependency(self):
+        """HTTP proxies work without `socksio`; SOCKS5 dies at construction.
+
+        httpx only pulls socksio in through its `socks` extra, so leaving it
+        out of pyproject.toml reproduces the original report on a clean
+        install: HTTP imports fine, every `socks5://` proxy errors.
+        """
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        deps = project["project"]["dependencies"]
+        assert any("httpx[socks]" in d or d.startswith("socksio") for d in deps)
+
+    def test_no_credentials_stays_a_plain_url(self):
+        from app.civision.accounts import proxy_for
+
+        assert proxy_for(self._proxy("socks5://10.0.0.1:1080")) == "socks5://10.0.0.1:1080"
+        assert proxy_for(None) is None
+
+    def test_socks5_credentials_travel_outside_the_url(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("socks5://10.0.0.1:1080", "user", "p%40ss:word@x"))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.scheme == "socks5"
+        assert built.url.host == "10.0.0.1"
+        assert built.url.port == 1080
+        assert built.url.username == ""
+        assert built.auth == ("user", "p%40ss:word@x")
+        assert built.raw_auth == (b"user", b"p%40ss:word@x")
+
+    def test_a_padded_url_is_trimmed(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("  socks5://10.0.0.1:1080  ", "user", "secret"))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.host == "10.0.0.1"
+        assert built.auth == ("user", "secret")
+
+    def test_credentials_already_in_the_url_are_lifted_out(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("socks5://old:p%40ss@10.0.0.1:1080"))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.username == ""
+        assert built.auth == ("old", "p@ss")
+
+    def test_the_admin_fields_win_over_credentials_in_the_url(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("socks5://old:stale@10.0.0.1:1080", "user", "fresh"))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.username == ""
+        assert built.auth == ("user", "fresh")
+
+    def test_http_auth_uses_the_same_separate_credentials(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("http://10.0.0.1:8080", "user", "p@ss"))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.scheme == "http"
+        assert built.auth == ("user", "p@ss")
+
+    def test_a_username_with_an_empty_password_still_authenticates(self):
+        from app.civision.accounts import proxy_for
+
+        built = proxy_for(self._proxy("socks5h://10.0.0.1:1080", "user", None))
+
+        assert isinstance(built, httpx.Proxy)
+        assert built.url.scheme == "socks5h"
+        assert built.auth == ("user", "")
+
+
+async def _socks5_stand_in(accept_password: bytes, seen: dict[str, bytes]):
+    """A local RFC 1928/1929 proxy that tunnels straight to the caller."""
+    import asyncio
+
+    async def handle(reader, writer):
+        try:
+            header = await reader.readexactly(2)
+            await reader.readexactly(header[1])
+            writer.write(b"\x05\x02")
+            await writer.drain()
+            await reader.readexactly(1)
+            seen["user"] = await reader.readexactly((await reader.readexactly(1))[0])
+            seen["password"] = await reader.readexactly(
+                (await reader.readexactly(1))[0]
+            )
+            if seen["password"] != accept_password:
+                writer.write(b"\x01\x01")
+                await writer.drain()
+                return
+            writer.write(b"\x01\x00")
+            await writer.drain()
+
+            request = await reader.readexactly(4)
+            if request[3] == 3:
+                await reader.readexactly((await reader.readexactly(1))[0])
+            elif request[3] == 1:
+                await reader.readexactly(4)
+            else:
+                await reader.readexactly(16)
+            await reader.readexactly(2)
+            writer.write(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
+            await writer.drain()
+
+            await reader.read(1024)
+            body = b'{"Code":200,"Data":{"UserName":"probe"},"Success":true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    return await asyncio.start_server(handle, "127.0.0.1", 0)
+
+
+async def _http_proxy_stand_in(seen: dict[str, bytes]):
+    """A local HTTP proxy that records basic auth and answers the probe."""
+    import asyncio
+    import base64
+
+    async def handle(reader, writer):
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            for line in request.split(b"\r\n"):
+                if line.lower().startswith(b"proxy-authorization:"):
+                    _, _, value = line.partition(b":")
+                    scheme, _, token = value.strip().partition(b" ")
+                    assert scheme.lower() == b"basic"
+                    seen["auth"] = base64.b64decode(token)
+            body = b'{"Code":200,"Data":{"UserName":"probe"},"Success":true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    return await asyncio.start_server(handle, "127.0.0.1", 0)
+
+
+class TestHttpProxySession:
+    async def test_the_probe_still_authenticates_through_an_http_proxy(
+        self, monkeypatch
+    ):
+        from app.civision import client as client_mod
+        from app.civision.accounts import proxy_for
+        from app.civision.client import CivisionClient
+
+        from app.crypto import encrypt
+
+        seen: dict[str, bytes] = {}
+        server = await _http_proxy_stand_in(seen)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(client_mod, "BASE", "http://modelscope.test")
+        try:
+            proxy = Proxy(
+                name="p",
+                url=f"http://127.0.0.1:{port}",
+                username="user",
+                password=encrypt("p@ss"),
+            )
+            client = CivisionClient(
+                jar={"m_session_id": "sid", "h_uid": "1"},
+                proxy=proxy_for(proxy),
+            )
+            info = await client.check_session()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert seen["auth"] == b"user:p@ss"
+        assert info.authenticated
+        assert info.username == "probe"
+
+
+class TestSocks5Session:
+    """The cookie probe must authenticate, then actually reach the tunnel."""
+
+    def _proxy(self, url: str, username: str, password: str):
+        from app.crypto import encrypt
+
+        return Proxy(
+            name="p",
+            url=url,
+            username=username,
+            password=encrypt(password),
+        )
+
+    async def test_the_probe_authenticates_and_reads_through_the_tunnel(
+        self, monkeypatch
+    ):
+        from app.civision import client as client_mod
+        from app.civision.accounts import proxy_for
+        from app.civision.client import CivisionClient
+
+        seen: dict[str, bytes] = {}
+        server = await _socks5_stand_in(b"p%40ss:word@x", seen)
+        port = server.sockets[0].getsockname()[1]
+        # Plain HTTP so the stand-in can answer without TLS.
+        monkeypatch.setattr(client_mod, "BASE", "http://modelscope.test")
+        try:
+            proxy = self._proxy(f"socks5://127.0.0.1:{port}", "user", "p%40ss:word@x")
+            client = CivisionClient(
+                jar={"m_session_id": "sid", "h_uid": "1"},
+                proxy=proxy_for(proxy),
+            )
+            info = await client.check_session()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert seen == {"user": b"user", "password": b"p%40ss:word@x"}
+        assert info.authenticated
+        assert info.username == "probe"
+
+    async def test_a_rejected_password_is_transient_not_expired(self, monkeypatch):
+        from app.civision import client as client_mod
+        from app.civision.accounts import proxy_for
+        from app.civision.client import CivisionClient
+
+        seen: dict[str, bytes] = {}
+        server = await _socks5_stand_in(b"the-right-one", seen)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(client_mod, "BASE", "http://modelscope.test")
+        try:
+            proxy = self._proxy(f"socks5://127.0.0.1:{port}", "user", "wrong")
+            client = CivisionClient(
+                jar={"m_session_id": "sid", "h_uid": "1"},
+                proxy=proxy_for(proxy),
+            )
+            info = await client.check_session()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert seen["password"] == b"wrong"
+        assert not info.authenticated
+        # A proxy problem says nothing about the cookie: the account must
+        # stay in the pool instead of being marked expired.
+        assert info.transient
+        assert "could not reach ModelScope" in info.reason
+
+
 class TestValidateAccount:
     async def test_a_transient_probe_does_not_expire(self, monkeypatch, db_session):
         from app.civision import accounts as accounts_mod

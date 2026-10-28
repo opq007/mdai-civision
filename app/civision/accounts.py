@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 from typing import Optional
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,32 +39,45 @@ def save_jar(account: Account, jar: dict[str, str]) -> None:
     account.cookie_jar = encrypt("; ".join(f"{k}={v}" for k, v in jar.items()))
 
 
-def proxy_url(proxy: Optional[Proxy]) -> Optional[str]:
-    """Build the httpx proxy URL, embedding credentials when present."""
+def proxy_for(proxy: Optional[Proxy]) -> Optional[str | httpx.Proxy]:
+    """Build the httpx proxy, keeping credentials out of the URL string.
+
+    Credentials travel as `httpx.Proxy(url, auth=(user, password))` rather
+    than as userinfo inside the URL, so the admin fields stay authoritative
+    and a password containing URL syntax (`@`, `:`, `%`) is never re-parsed.
+
+    SOCKS5 itself needs httpx's `socks` extra (`socksio`); the dependency is
+    declared in pyproject.toml precisely because HTTP proxies work without it
+    and would hide a missing extra until someone switches to `socks5://`.
+    """
     if proxy is None:
         return None
-    url = proxy.url
+    url = (proxy.url or "").strip()
+    if not url:
+        return None
+
+    parsed = httpx.URL(url)
+    embedded_user, embedded_password = parsed.username, parsed.password
+    if embedded_user or embedded_password:
+        # Never leave credentials in the URL: httpx ignores `auth=` whenever
+        # the URL carries userinfo, which would silently override the fields
+        # the operator filled in.
+        url = str(parsed.copy_with(username=None, password=None))
+
     if proxy.username:
-        scheme, sep, rest = url.partition("://")
-        if not sep:
-            scheme, rest = "", url
-        from urllib.parse import quote
-
-        from app.crypto import decrypt
-
-        cred = quote(proxy.username, safe="")
-        if proxy.password:
-            secret = decrypt(proxy.password)
-            if secret:
-                cred += ":" + quote(secret, safe="")
-        url = f"{scheme}://{cred}@{rest}" if scheme else f"{cred}@{rest}"
+        secret = decrypt(proxy.password) if proxy.password else ""
+        # An empty password is still an authentication attempt: SOCKS5 treats
+        # "username with no password" differently from "no authentication".
+        return httpx.Proxy(url, auth=(proxy.username, secret))
+    if embedded_user or embedded_password:
+        return httpx.Proxy(url, auth=(embedded_user, embedded_password or ""))
     return url
 
 
 def client_for(account: Account, proxy: Optional[Proxy] = None) -> CivisionClient:
     return CivisionClient(
         jar=stored_jar(account),
-        proxy=proxy_url(proxy),
+        proxy=proxy_for(proxy),
         user_agent=account.user_agent,
     )
 
@@ -125,7 +139,7 @@ async def add_account_from_cookies(
     """
     settings = get_settings()
     proxy = await session.get(Proxy, proxy_id) if proxy_id else None
-    info = await probe_pasted_cookies(cookie_text, proxy_url(proxy), user_agent)
+    info = await probe_pasted_cookies(cookie_text, proxy_for(proxy), user_agent)
     if not info.authenticated:
         return None, info
 
