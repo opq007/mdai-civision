@@ -200,7 +200,7 @@ class CivisionClient:
     def __init__(
         self,
         jar: dict[str, str] | None = None,
-        proxy: str | None = None,
+        proxy: str | httpx.Proxy | None = None,
         timeout: float | None = None,
         user_agent: str | None = None,
     ) -> None:
@@ -730,7 +730,7 @@ class CivisionClient:
 
 
 async def probe_pasted_cookies(
-    raw: str, proxy: str | None = None, user_agent: str | None = None
+    raw: str, proxy: str | httpx.Proxy | None = None, user_agent: str | None = None
 ) -> SessionInfo:
     """Validate a pasted cookie string without needing an account object.
 
