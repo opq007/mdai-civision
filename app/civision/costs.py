@@ -1,11 +1,14 @@
 """The magicube cost table, measured from upstream.
 
 Every value here was read from the free `estimate-quota` endpoint with the
-same arguments the civision page sends, so the table reflects what a job
-actually costs. The page quotes the same numbers.
+arguments this service actually sends, so the table reflects what a job
+costs. That includes the step count: Wan runs 20 steps here instead of the
+catalog's 50, so its numbers are lower than the page's defaults.
 
-Cost depends on the pixel count of the requested size and on the duration,
-not on the exact width/height pair, so the table is keyed by size.
+Cost depends on the pixel count of the requested size, the duration and the
+sampling steps, not on the exact width/height pair, so the table is keyed by
+size. A caller who overrides `num_inference_steps` changes the quote; this
+table describes the service's defaults.
 """
 
 from __future__ import annotations
@@ -42,66 +45,67 @@ class CostLine:
     first_of_model: bool = False
 
 
-# Measured values, as of 2026-10-22.
+# Measured values, as of 2026-10-28.
 #
 # The three models the service exposes, with the magicubes a job costs at
-# each supported size and duration.
+# each supported size and duration. The Wan rows are measured at 20 steps,
+# the step count this service defaults to; MiniMax-H3 rows are at 4 steps.
 #
-# Wan2.1-T2V-1.3B (versionId 546)
-#   720x1280  3s=3  5s=6
-#   720x960   3s=3  5s=6
-#   720x720   3s=3  5s=6
-#   960x720   3s=3  5s=6
-#   1280x720  3s=3  5s=6
-#   480x848   3s=3  5s=6
-#   480x640   3s=2  5s=3
-#   480x480   3s=2  5s=3
-#   640x480   3s=2  5s=3
-#   848x480   3s=3  5s=6
+# Wan2.1-T2V-1.3B (versionId 546, 20 steps)
+#   720x1280  3s=1  5s=2  10s=5
+#   720x960   3s=1  5s=2  10s=5
+#   720x720   3s=1  5s=2  10s=5
+#   960x720   3s=1  5s=2  10s=5
+#   1280x720  3s=1  5s=2  10s=5
+#   480x848   3s=1  5s=2  10s=5
+#   480x640   3s=1  5s=1  10s=2
+#   480x480   3s=1  5s=1  10s=2
+#   640x480   3s=1  5s=1  10s=2
+#   848x480   3s=1  5s=2  10s=5
 #
-# Wan2.1-I2V-14B (versionId 648)
-#   720x1280  3s=17  5s=28
-#   720x960   3s=17  5s=28
-#   720x720   3s=17  5s=28
-#   960x720   3s=17  5s=28
-#   1280x720  3s=17  5s=28
-#   480x848   3s=17  5s=28
-#   480x640   3s=8   5s=13
-#   480x480   3s=8   5s=13
-#   640x480   3s=8   5s=13
-#   848x480   3s=17  5s=28
+# Wan2.1-I2V-14B (versionId 648, 20 steps)
+#   720x1280  3s=7  5s=11  10s=23
+#   720x960   3s=7  5s=11  10s=23
+#   720x720   3s=7  5s=11  10s=23
+#   960x720   3s=7  5s=11  10s=23
+#   1280x720  3s=7  5s=11  10s=23
+#   480x848   3s=7  5s=11  10s=23
+#   480x640   3s=3  5s=5   10s=10
+#   480x480   3s=3  5s=5   10s=10
+#   640x480   3s=3  5s=5   10s=10
+#   848x480   3s=7  5s=11  10s=23
 #
 # MiniMax-H3 (versionId 150867, LoRA acceleration on, 4 steps)
 #   every size  3s=34  5s=56  10s=113
 #
 # Note: the civision page hides the 10 second option for the Wan models
-# ("stay tuned"), but the endpoint accepts it: 720x1280 10s costs 11 for
-# Wan2.1-T2V-1.3B and 480x480 10s costs 5.
+# ("stay tuned"), but the endpoint accepts it: 720x1280 10s costs 5 for
+# Wan2.1-T2V-1.3B and 480x480 10s costs 2.
 
 MEASURED: dict[str, dict[tuple[int, int], dict[int, float]]] = {
     "WAN_VIDEO_2_1_T2V_1_3_B": {
-        (720, 1280): {3: 3, 5: 6, 10: 11},
-        (720, 960): {3: 3, 5: 6, 10: 11},
-        (720, 720): {3: 3, 5: 6, 10: 11},
-        (960, 720): {3: 3, 5: 6, 10: 11},
-        (1280, 720): {3: 3, 5: 6, 10: 11},
-        (480, 848): {3: 3, 5: 6, 10: 11},
-        (480, 640): {3: 2, 5: 3, 10: 5},
-        (480, 480): {3: 2, 5: 3, 10: 5},
-        (640, 480): {3: 2, 5: 3, 10: 5},
-        (848, 480): {3: 3, 5: 6, 10: 11},
+        (720, 1280): {3: 1, 5: 2, 10: 5},
+        (720, 960): {3: 1, 5: 2, 10: 5},
+        (720, 720): {3: 1, 5: 2, 10: 5},
+        (960, 720): {3: 1, 5: 2, 10: 5},
+        (1280, 720): {3: 1, 5: 2, 10: 5},
+        (480, 848): {3: 1, 5: 2, 10: 5},
+        (480, 640): {3: 1, 5: 1, 10: 2},
+        (480, 480): {3: 1, 5: 1, 10: 2},
+        (640, 480): {3: 1, 5: 1, 10: 2},
+        (848, 480): {3: 1, 5: 2, 10: 5},
     },
     "WAN_VIDEO_2_1_I2V_14_B": {
-        (720, 1280): {3: 17, 5: 28, 10: 56},
-        (720, 960): {3: 17, 5: 28},
-        (720, 720): {3: 17, 5: 28},
-        (960, 720): {3: 17, 5: 28},
-        (1280, 720): {3: 17, 5: 28, 10: 56},
-        (480, 848): {3: 17, 5: 28, 10: 56},
-        (480, 640): {3: 8, 5: 13, 10: 25},
-        (480, 480): {3: 8, 5: 13, 10: 25},
-        (640, 480): {3: 8, 5: 13, 10: 25},
-        (848, 480): {3: 17, 5: 28, 10: 56},
+        (720, 1280): {3: 7, 5: 11, 10: 23},
+        (720, 960): {3: 7, 5: 11, 10: 23},
+        (720, 720): {3: 7, 5: 11, 10: 23},
+        (960, 720): {3: 7, 5: 11, 10: 23},
+        (1280, 720): {3: 7, 5: 11, 10: 23},
+        (480, 848): {3: 7, 5: 11, 10: 23},
+        (480, 640): {3: 3, 5: 5, 10: 10},
+        (480, 480): {3: 3, 5: 5, 10: 10},
+        (640, 480): {3: 3, 5: 5, 10: 10},
+        (848, 480): {3: 7, 5: 11, 10: 23},
     },
     "MINIMAX_H3": {
         (768, 1280): {3: 34, 5: 56, 10: 113},

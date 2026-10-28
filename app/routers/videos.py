@@ -165,7 +165,7 @@ async def create_video(
         width=width,
         height=height,
         guidance_scale=body.guidance_scale or model.default_guidance_scale,
-        num_inference_steps=body.num_inference_steps or model.default_steps,
+        num_inference_steps=model.resolve_steps(body.num_inference_steps),
         status="queued",
         progress=0,
         created_at=now,

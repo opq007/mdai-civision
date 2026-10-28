@@ -159,12 +159,20 @@ GET /api/v1/auth/login/generate/oauth2/url
 
 | 公用名 | civision 值 | versionId | 能力 | 时长 | 加速 | 步数 |
 |---|---|---|---|---|---|---|
-| `wan2.1-t2v-1.3b` | `WAN_VIDEO_2_1_T2V_1_3_B` | 546 | 文生视频 | 3 / 5 秒 | — | 50 |
-| `wan2.1-i2v-14b` | `WAN_VIDEO_2_1_I2V_14_B` | 648 | **图生视频** | 3 / 5 秒 | — | 50 |
+| `wan2.1-t2v-1.3b` | `WAN_VIDEO_2_1_T2V_1_3_B` | 546 | 文生视频 | 3 / 5 秒 | — | 20 |
+| `wan2.1-i2v-14b` | `WAN_VIDEO_2_1_I2V_14_B` | 648 | **图生视频** | 3 / 5 秒 | — | 20 |
 | `minimax-h3-turbo` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | **开** | 4 |
 | `minimax-h3` | `MINIMAX_H3` | 150867 | 文生 / 图生 / 首尾帧 | 3 / 5 / 10 秒 | 关 | 20 |
 
 外加两个 OpenAI 别名：`sora-2` → `minimax-h3-turbo`，`sora-2-pro` → `minimax-h3`。
+
+> Wan 的目录默认是 50 步；本服务默认用 20 步（与不加速的 MiniMax-H3 一致），
+> 请求里可用 `num_inference_steps` 覆盖。civision 页面的「采样步数」滑块范围
+> 是 1–50、默认 50。免费估算实测 20 步被上游接受且报价更低
+> （480×480/3s：2→1；720×1280/5s：6→2）。
+>
+> `minimax-h3-turbo` 打开加速时，页面会把步数强制为 4 并隐藏滑块；服务端
+> 同样钉死为 4，请求里的 `num_inference_steps` 不会生效。
 
 > **两个 `minimax-h3` 是同一个上游模型**（versionId 150867），区别只在
 > civision 网页上的「LoRA 推理加速」开关：开 → 步数钉在 4、价格减半；

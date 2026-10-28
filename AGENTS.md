@@ -22,7 +22,7 @@ Magicube cost is driven by resolution and duration, and it escalates fast:
 
 | Model | Resolution | Duration | Magicubes |
 |---|---|---|---|
-| Wan2.1-T2V-1.3B | 480×480 | 3s | ~2 |
+| Wan2.1-T2V-1.3B | 480×480 | 3s | ~1 |
 | Wan2.1-T2V-1.3B | 720×1280 | 5s | ~23 |
 | Wan2.2-T2V-A14B | 720×1280 | 5s | ~23 |
 | MiniMax-H3 | 768×1280 | 10s | **~113** |
@@ -265,6 +265,21 @@ is a public model name, and the variant list lives in `MODEL_VARIANTS`.
 The civision page behaves exactly this way: the switch is on or off, and the
 page sends the flag either way. Writing `model.accelerate_lora or None` would
 collapse `False` into "omit the block" and silently send the wrong parameters.
+
+**Wan runs at 20 steps, not the catalog's 50.** The civision page's
+sampling-steps slider covers 1–50 and defaults to 50; the submit body carries
+whatever the slider shows. Fifty steps is slow on Wan, and upstream prices by
+step count, so `DEFAULT_STEP_OVERRIDES` in `app/civision/mapping.py` lowers
+both Wan models to 20 — the same step count as the unaccelerated
+MiniMax-H3. A caller can still pass `num_inference_steps` to override it.
+Verified free with `estimate-quota`: 20 is accepted and costs less
+(480×480/3s: 2 → 1 magicube, 720×1280/5s: 6 → 2).
+
+**LoRA acceleration pins the step count.** `ResolvedModel.resolve_steps()`
+returns 4 whenever `accelerate_lora` is on, ignoring a caller-supplied
+`num_inference_steps`, because the page forces 4 and hides the slider in that
+mode. Both the router (job creation) and the runner (before submitting, which
+also corrects jobs queued before this rule) go through that method.
 
 The cost table in `app/civision/costs.py` was measured with the free
 `estimate-quota` endpoint. It is keyed by civision value for the plain

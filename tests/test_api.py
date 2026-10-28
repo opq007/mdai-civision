@@ -161,6 +161,61 @@ class TestVideoCreation:
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "queued"
 
+    def test_wan_defaults_to_twenty_steps(self, client, monkeypatch):
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["steps"] = job.num_inference_steps
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={"model": "wan2.1-t2v-1.3b", "prompt": "a bird", "seconds": "4"},
+        )
+        assert r.status_code == 200, r.text
+        assert seen["steps"] == 20
+
+    def test_wan_steps_can_be_overridden(self, client, monkeypatch):
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["steps"] = job.num_inference_steps
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={
+                "model": "wan2.1-t2v-1.3b",
+                "prompt": "a bird",
+                "seconds": "4",
+                "num_inference_steps": 25,
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert seen["steps"] == 25
+
+    def test_accelerated_variant_pins_steps_to_four(self, client, monkeypatch):
+        seen: dict = {}
+
+        async def capture(session, job):
+            seen["steps"] = job.num_inference_steps
+
+        monkeypatch.setattr("app.routers.videos.enqueue_job", capture)
+        r = client.post(
+            "/v1/videos",
+            headers=self._headers(),
+            json={
+                "model": "minimax-h3-turbo",
+                "prompt": "a bird",
+                "seconds": "4",
+                "num_inference_steps": 25,
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert seen["steps"] == 4
+
     def test_a_bare_image_string_is_stored_on_the_job(self, client, monkeypatch):
         # new-api's OpenAI video channel declares input_reference as a string
         # and forwards that string. The object form above must keep working too.
