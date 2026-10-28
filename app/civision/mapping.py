@@ -81,6 +81,22 @@ ACCELERATED_STEPS = 4
 # default from the model catalog.
 MINIMAX_DEFAULT_STEPS = 20
 
+# The civision page offers 1-50 sampling steps for every video model and
+# starts at 50. Fifty steps is slow on the Wan models, and upstream prices by
+# step count, so this service runs them at 20 — the same step count as the
+# unaccelerated MiniMax-H3 — unless the caller overrides
+# `num_inference_steps`. The free estimate endpoint confirms 20 is accepted
+# and quotes less: 480x480/3s goes 2 -> 1 magicube, 720x1280/5s 6 -> 2.
+WAN_DEFAULT_STEPS = 20
+
+# civision value -> the step count this service uses instead of the catalog's
+# published default. Only Wan is overridden; MiniMax-H3's step count is
+# decided by its acceleration variant below.
+DEFAULT_STEP_OVERRIDES: dict[str, int] = {
+    "WAN_VIDEO_2_1_T2V_1_3_B": WAN_DEFAULT_STEPS,
+    "WAN_VIDEO_2_1_I2V_14_B": WAN_DEFAULT_STEPS,
+}
+
 # MiniMax-H3 has a "LoRA acceleration" switch on the civision page. On, it
 # pins numInferenceSteps to 4 and halves the cost; off, the model runs at its
 # published 20 steps. The two settings give noticeably different results, so
@@ -176,6 +192,17 @@ class ResolvedModel:
         if label:
             return label
         return None
+
+    def resolve_steps(self, requested: int | None) -> int:
+        """The sampling step count to send upstream.
+
+        LoRA acceleration pins the count: the page forces
+        `numInferenceSteps` to 4 and hides the slider, so a caller cannot
+        raise it. Otherwise an explicit request wins over the model default.
+        """
+        if self.accelerate_lora:
+            return ACCELERATED_STEPS
+        return requested or self.default_steps
 
 
 # civision value -> friendly name. The upstream names encode the version in
@@ -275,6 +302,9 @@ def build_catalog(catalog: list[dict], aliases: dict[str, str]) -> list[Resolved
         # MiniMax-H3 is the only model that offers the 10 second duration.
         seconds = CIVISION_SECONDS
         model_steps = int(dp.get("numInferenceSteps") or 50)
+        override_steps = DEFAULT_STEP_OVERRIDES.get(value.upper())
+        if override_steps is not None:
+            model_steps = override_steps
         if value.upper() == "MINIMAX_H3":
             seconds = CIVISION_SECONDS
             # Without an explicit setting, the civision page turns LoRA

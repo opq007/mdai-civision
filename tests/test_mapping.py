@@ -265,7 +265,7 @@ class TestModelResolution:
         h3 = resolve_model("minimax-h3", models)
         assert h3.supports_txt2video and h3.supports_img2video and h3.supports_flf2video
 
-    def test_model_defaults_come_from_upstream(self, models):
+    def test_model_defaults(self, models):
         h3 = resolve_model("minimax-h3", models)
         assert h3.default_guidance_scale == 4
         # MiniMax-H3 without acceleration runs at its published step count.
@@ -275,7 +275,8 @@ class TestModelResolution:
         assert turbo.default_steps == 4
         wan = resolve_model("wan2.1-t2v-1.3b", models)
         assert wan.default_guidance_scale == 7.5
-        assert wan.default_steps == 50
+        # The catalog publishes 50 steps for Wan; this service runs 20.
+        assert wan.default_steps == 20
 
 
 class TestAccelerateLora:
@@ -301,7 +302,21 @@ class TestAccelerateLora:
         for name in ("wan2.1-t2v-1.3b", "wan2.1-i2v-14b"):
             m = resolve_model(name, models)
             assert m.accelerate_lora is None
-            assert m.default_steps == 50
+            assert m.default_steps == 20
+
+    def test_acceleration_pins_steps_even_when_the_request_overrides(self, models):
+        turbo = resolve_model("minimax-h3-turbo", models)
+        assert turbo.resolve_steps(25) == 4
+        assert turbo.resolve_steps(None) == 4
+
+    def test_plain_minimax_accepts_a_step_override(self, models):
+        h3 = resolve_model("minimax-h3", models)
+        assert h3.resolve_steps(30) == 30
+
+    def test_wan_defaults_to_twenty_and_accepts_an_override(self, models):
+        wan = resolve_model("wan2.1-t2v-1.3b", models)
+        assert wan.resolve_steps(None) == 20
+        assert wan.resolve_steps(25) == 25
 
     def test_both_variants_are_the_same_upstream_model(self, models):
         turbo = resolve_model("minimax-h3-turbo", models)
@@ -384,8 +399,9 @@ class TestCostTable:
         from app.civision.costs import lookup
 
         wan = resolve_model("wan2.1-t2v-1.3b", models)
-        assert lookup(wan, 480, 480, 3) == 2
-        assert lookup(wan, 720, 1280, 5) == 6
+        # Measured at the service's 20-step default, not the page's 50.
+        assert lookup(wan, 480, 480, 3) == 1
+        assert lookup(wan, 720, 1280, 5) == 2
 
         # The accelerated variant.
         turbo = resolve_model("minimax-h3-turbo", models)

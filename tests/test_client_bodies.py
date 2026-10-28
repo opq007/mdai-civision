@@ -328,7 +328,7 @@ class TestModelVariantsReachTheWire:
 
         model = resolve_model("wan2.1-t2v-1.3b", catalog)
         body = await self._body_for(client, calls, model)
-        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 50
+        assert body["basicDiffusionArgs"]["numInferenceSteps"] == 20
         assert "videoInferenceArgs" not in body
 
 
